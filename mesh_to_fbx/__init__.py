@@ -29,12 +29,6 @@ def export_mesh_callback(ctx: qrd.CaptureContext, data):
         print("Export mesh callback called!")
         print("=" * 50)
         
-        # First, show a simple message to confirm callback is working
-        ctx.Extensions().MessageDialog(
-            "Export Mesh to FBX callback triggered!\n\nThis confirms the menu item is working.",
-            "Export Mesh to FBX - Test"
-        )
-        
         if exporter is None:
             print("Creating new MeshExporter instance")
             exporter = MeshExporter(ctx)

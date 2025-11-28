@@ -1,0 +1,10 @@
+{
+	"extension_api": 1,
+	"name": "Export Mesh to FBX",
+	"version": "1.0",
+	"minimum_renderdoc": "1.12",
+	"description": "Export mesh data to FBX format by first exporting CSV files and then building FBX from CSV data.",
+	"author": "RenderDoc Extension",
+	"url": "https://github.com/baldurk/renderdoc"
+}
+

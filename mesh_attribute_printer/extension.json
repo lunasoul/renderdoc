@@ -1,0 +1,10 @@
+{
+	"extension_api": 1,
+	"name": "Mesh Attribute Printer",
+	"version": "1.0",
+	"minimum_renderdoc": "1.12",
+	"description": "Print all vertex attributes from Mesh Viewer to a text file.",
+	"author": "RenderDoc Extension",
+	"url": "https://github.com/baldurk/renderdoc"
+}
+

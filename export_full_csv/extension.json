@@ -1,0 +1,10 @@
+{
+	"extension_api": 1,
+	"name": "Export Full CSV",
+	"version": "1.0",
+	"minimum_renderdoc": "1.12",
+	"description": "Export VS Input and VS Output to CSV files using RenderDoc's built-in export functionality.",
+	"author": "RenderDoc Extension",
+	"url": "https://github.com/baldurk/renderdoc"
+}
+

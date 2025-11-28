@@ -61,50 +61,6 @@ class MeshExporter:
                 )
                 return
             
-            # Show export options dialog
-            print("Showing export options dialog")
-            self._show_export_options_dialog(event_id)
-        except Exception as e:
-            import traceback
-            error_msg = "Error in show_export_dialog: {}\n{}".format(str(e), traceback.format_exc())
-            print(error_msg)
-            self.ctx.Extensions().ErrorDialog(error_msg, "Export Mesh to FBX Error")
-    
-    def _show_export_options_dialog(self, event_id: int):
-        """Show dialog to select export options"""
-        try:
-            print("_show_export_options_dialog called with event_id: {}".format(event_id))
-            # Use a simple approach: show a question dialog to select export mode
-            # Then get file path and export
-            
-            # Show mode selection dialog
-            mode_text = (
-                "Select export mode:\n\n"
-                "1. VS Input Only - Export vertex shader input attributes\n"
-                "2. VS Input Position + VS Output - Use input position with output attributes\n"
-                "3. VS Output Only - Export vertex shader output attributes\n\n"
-                "Click Yes for VS Input Only, No for Mixed, or Cancel for VS Output Only"
-            )
-            
-            print("Showing question dialog")
-            result = self.ctx.Extensions().QuestionDialog(
-                mode_text,
-                [qrd.DialogButton.Yes, qrd.DialogButton.No, qrd.DialogButton.Cancel],
-                "Export Mesh to FBX - Select Mode"
-            )
-            
-            print("Question dialog result: {}".format(result))
-            
-            # Determine export mode
-            if result == qrd.DialogButton.Yes:
-                export_mode = ExportMode.VS_INPUT_ONLY
-            elif result == qrd.DialogButton.No:
-                export_mode = ExportMode.VS_INPUT_POSITION_VS_OUTPUT
-            else:  # Cancel or close
-                export_mode = ExportMode.VS_OUTPUT_ONLY
-            
-            print("Selected export mode: {}".format(export_mode))
-            
             # Get file path
             print("Showing save file dialog")
             file_path = self.ctx.Extensions().SaveFileName(
@@ -113,10 +69,11 @@ class MeshExporter:
                 "FBX Files (*.fbx);;All Files (*.*)"
             )
             
-            print("File path selected: {}".format(file_path))
             if not file_path:
-                print("No file path selected, aborting")
+                print("User cancelled file selection")
                 return
+            
+            print("Selected file: {}".format(file_path))
             
             # Get the action before async call (needs to be on UI thread)
             print("Getting action for event {}".format(event_id))
@@ -136,12 +93,12 @@ class MeshExporter:
                 )
                 return
             
-            # Perform export
+            # Perform export (VS Output only)
             print("Starting async export")
             def do_export(r: rd.ReplayController):
                 try:
                     print("do_export called in replay thread")
-                    self._export_mesh(r, action, export_mode, file_path)
+                    self._export_mesh(r, action, file_path)
                     print("Export completed successfully")
                     self.mqt.InvokeOntoUIThread(
                         lambda: self.ctx.Extensions().MessageDialog(
@@ -161,43 +118,36 @@ class MeshExporter:
                     )
             
             self.ctx.Replay().AsyncInvoke('', do_export)
-            print("AsyncInvoke called")
         except Exception as e:
             import traceback
-            error_msg = "Error in _show_export_options_dialog: {}\n{}".format(str(e), traceback.format_exc())
+            error_msg = "Error in show_export_dialog: {}\n{}".format(str(e), traceback.format_exc())
             print(error_msg)
             self.ctx.Extensions().ErrorDialog(error_msg, "Export Mesh to FBX Error")
     
-    def _export_mesh(self, controller: rd.ReplayController, action: rd.ActionDescription,
-                     export_mode: ExportMode, file_path: str):
-        """Export mesh data to FBX file"""
+    
+    def _export_mesh(self, controller: rd.ReplayController, action: rd.ActionDescription, file_path: str):
+        """Export mesh data to FBX file (VS Output only)"""
         try:
             event_id = action.eventId
-            print("_export_mesh called: event_id={}, mode={}, file={}".format(event_id, export_mode, file_path))
+            print("_export_mesh called: event_id={}, file={}".format(event_id, file_path))
             # Set the event
             print("Setting frame event")
             controller.SetFrameEvent(event_id, True)
             
-            # Get mesh data based on export mode
-            print("Getting mesh data, mode: {}".format(export_mode))
-            vertices = []
-            indices = []
-            
-            if export_mode == ExportMode.VS_INPUT_ONLY:
-                print("Getting VS input mesh")
-                vertices, indices = self._get_vs_input_mesh(controller, action)
-            elif export_mode == ExportMode.VS_INPUT_POSITION_VS_OUTPUT:
-                print("Getting mixed mesh")
-                vertices, indices = self._get_mixed_mesh(controller, action)
-            elif export_mode == ExportMode.VS_OUTPUT_ONLY:
-                print("Getting VS output mesh")
-                vertices, indices = self._get_vs_output_mesh(controller, action)
+            # For now, only support VS Output mode to verify UV correctness
+            print("Reading VS Output mesh data (refactored version)")
+            vertices, indices, raw_uv_data = self._read_vs_output(controller, action)
             
             print("Got {} vertices and {} indices".format(len(vertices), len(indices)))
+            if raw_uv_data:
+                print("Got {} UV coordinates".format(len(raw_uv_data)))
+                # Print first few UV values for verification
+                for i in range(min(5, len(raw_uv_data))):
+                    print("  UV[{}] = ({}, {})".format(i, raw_uv_data[i][0], raw_uv_data[i][1]))
             
             # Export to FBX
             print("Writing FBX file")
-            self._write_fbx(file_path, vertices, indices)
+            self._write_fbx(file_path, vertices, indices, raw_uv_data)
             print("FBX file written successfully")
         except Exception as e:
             import traceback
@@ -299,140 +249,213 @@ class MeshExporter:
         idx_to_vertex_idx = {idx: i for i, idx in enumerate(sorted_indices)}
         
         # Create display indices: for each index position, map its IDX to vertex index
-        min_idx = min(sorted_indices) if sorted_indices else 0
-        display_indices = [idx_to_vertex_idx[indices[vtx_idx]] - idx_to_vertex_idx[min_idx] for vtx_idx in range(num_indices)]
+        display_indices = [idx_to_vertex_idx[indices[vtx_idx]] for vtx_idx in range(num_indices)]
         
-        return vertices, display_indices
+        # VS input typically doesn't have UV data, return empty list
+        raw_uv_data = [(0.0, 0.0)] * num_indices
+        
+        return vertices, display_indices, raw_uv_data
     
-    def _get_vs_output_mesh(self, controller: rd.ReplayController,
-                           action: rd.ActionDescription) -> Tuple[List[Dict], List[int]]:
-        """Get VS output mesh data"""
-        # Get post-VS data
+    def _read_vs_output(self, controller: rd.ReplayController, action: rd.ActionDescription):
+        """
+        Read VS Output data exactly like mesh_attribute_printer does.
+        Returns: (vertices, indices, uv_data)
+        - vertices: List of vertex dicts, each with position and other attributes
+        - indices: List of vertex indices for triangles
+        - uv_data: List of (u, v) tuples in VTX order
+        """
+        # Get PostVS data
         postvs = controller.GetPostVSData(0, 0, rd.MeshDataStage.VSOut)
         
         if postvs.numIndices == 0:
             raise RuntimeError("No VS output data available")
         
-        # Get VS output attributes
-        vs = controller.GetPipelineState().GetShaderReflection(rd.ShaderStage.Vertex)
+        # Get shader reflection
+        pipe = controller.GetPipelineState()
+        vs = pipe.GetShaderReflection(rd.ShaderStage.Vertex)
         if vs is None:
             raise RuntimeError("Could not get vertex shader reflection")
         
-        # Build attribute list
-        attrs = []
-        posidx = -1
+        # Get indices for IDX column (from VS Input)
+        ib = pipe.GetIBuffer()
+        indices = self._get_indices(controller, ib, action)
+        num_vertices = postvs.numIndices
         
+        # Build attribute list from shader output signature (exactly like mesh_attribute_printer)
+        attrs = []
         for sig in vs.outputSignature:
-            attr = MeshAttribute()
-            attr.mesh = postvs
+            # Skip if not on rasterized stream
+            if pipe.GetRasterizedStream() >= 0:
+                if sig.stream != pipe.GetRasterizedStream():
+                    continue
+            else:
+                if sig.stream != 0:
+                    continue
+            
+            # Skip output indices
+            if sig.systemValue == rd.ShaderBuiltin.OutputIndices:
+                continue
+            
+            attr = type('Attr', (), {})()
+            attr.name = sig.semanticIdxName if sig.varName == '' else sig.varName
             attr.format = rd.ResourceFormat()
             attr.format.compByteWidth = rd.VarTypeByteSize(sig.varType)
             attr.format.compCount = sig.compCount
             attr.format.compType = rd.VarTypeCompType(sig.varType)
             attr.format.type = rd.ResourceFormatType.Regular
-            attr.name = sig.semanticIdxName if sig.varName == '' else sig.varName
-            
-            if sig.systemValue == rd.ShaderBuiltin.Position:
-                posidx = len(attrs)
-            
+            attr.mesh = rd.MeshFormat(postvs)
             attrs.append(attr)
         
-        # Move position to front
-        if posidx > 0:
-            pos = attrs[posidx]
-            del attrs[posidx]
-            attrs.insert(0, pos)
+        if len(attrs) == 0:
+            raise RuntimeError("No output attributes found")
         
-        # Calculate offsets
+        # Calculate attribute offsets (exactly like mesh_attribute_printer)
         accum_offset = 0
         for attr in attrs:
             fmt = attr.format
             elem_size = (8 if fmt.compByteWidth > 4 else 4)
-            alignment = elem_size
-            if fmt.compCount == 2:
-                alignment = elem_size * 2
-            elif fmt.compCount > 2:
-                alignment = elem_size * 4
             
-            pipe = controller.GetPipelineState()
+            # Alignment
+            alignment = elem_size * 4
             if pipe.HasAlignedPostVSData(rd.MeshDataStage.VSOut) and (accum_offset % alignment) != 0:
-                accum_offset += alignment - (accum_offset % alignment)
+                padding = alignment - (accum_offset % alignment)
+                accum_offset += padding
             
-            attr.mesh.vertexByteOffset = postvs.vertexByteOffset + accum_offset
+            attr.offset = postvs.vertexByteOffset + accum_offset
             accum_offset += elem_size * fmt.compCount
         
-        # Get indices (these are the original buffer indices, IDX)
-        indices = self._get_indices_from_mesh(controller, postvs)
+        # Get output buffer
+        output_buffer_size = postvs.vertexByteOffset + postvs.vertexByteStride * num_vertices
+        output_buffer = controller.GetBufferData(postvs.vertexResourceId, 0, output_buffer_size)
         
-        # Get entire vertex buffer once
-        # PostVS data is in VTX order, so we need buffer size for numIndices vertices
-        num_vertices = postvs.numIndices
-        buffer_size = postvs.vertexByteOffset + postvs.vertexByteStride * num_vertices
-        buffer_data = controller.GetBufferData(postvs.vertexResourceId, 0, buffer_size)
+        # Find Position and TEXCOORD0 attributes
+        # Position is usually the first attribute or named SV_Position
+        position_attr = None
+        texcoord0_attr = None
         
-        # Pre-calculate which attribute is position
-        position_attr_idx = 0  # Position is moved to front
-        if posidx > 0:
-            position_attr_idx = 0
+        for i, attr in enumerate(attrs):
+            attr_name_lower = attr.name.lower()
+            # Check for Position (usually first or named SV_Position)
+            if position_attr is None:
+                if attr_name_lower in ('sv_position', 'position') or i == 0:
+                    position_attr = attr
+            # Check for TEXCOORD0
+            if texcoord0_attr is None:
+                if attr_name_lower in ('texcoord0', 'texcoordo') and attr.format.compCount >= 2:
+                    texcoord0_attr = attr
         
-        # Pre-calculate offsets for all attributes
-        attr_offsets = []
-        for attr in attrs:
-            attr_offsets.append(attr.mesh.vertexByteOffset)
+        # If no explicit Position found, use first attribute
+        if position_attr is None and len(attrs) > 0:
+            position_attr = attrs[0]
         
-        # Get vertex data - use IDX as unique vertex identifier (like reference script)
-        # PostVS data is stored in VTX order, but we should read by IDX
-        # For each unique IDX, find its VTX position and read PostVS data
-        vertex_data_by_idx = {}  # {idx: vertex_dict}
-        num_indices = len(indices)
+        print("VS Output attributes:")
+        for i, attr in enumerate(attrs):
+            print("  [{}] '{}': offset={}, compCount={}, compType={}, compByteWidth={}".format(
+                i, attr.name, attr.offset, attr.format.compCount, 
+                attr.format.compType, attr.format.compByteWidth))
         
-        # Create mapping: IDX -> list of VTX positions where this IDX appears
-        idx_to_vtx_positions = {}
-        for vtx in range(num_indices):
-            idx = indices[vtx]
-            if idx not in idx_to_vtx_positions:
-                idx_to_vtx_positions[idx] = []
-            idx_to_vtx_positions[idx].append(vtx)
+        if position_attr:
+            print("  Position: '{}' at offset={}".format(position_attr.name, position_attr.offset))
+        if texcoord0_attr:
+            print("  TEXCOORD0: '{}' at offset={}, compCount={}".format(
+                texcoord0_attr.name, texcoord0_attr.offset, texcoord0_attr.format.compCount))
+        else:
+            print("  TEXCOORD0: NOT FOUND")
+            # List all TEXCOORD-like attributes
+            print("  Available TEXCOORD attributes:")
+            for attr in attrs:
+                if 'texcoord' in attr.name.lower():
+                    print("    - '{}' (compCount={})".format(attr.name, attr.format.compCount))
         
-        # Get vertex data for each unique IDX
-        for idx in idx_to_vtx_positions.keys():
-            # Use the first VTX position for this IDX to read PostVS data
-            # (all VTX positions for same IDX should have same data)
-            vtx = idx_to_vtx_positions[idx][0]
-            
+        # Read vertex data in VTX order (exactly like mesh_attribute_printer)
+        vertices_data = []  # List of vertex dicts in VTX order
+        uv_data = []  # List of (u, v) tuples in VTX order
+        
+        # Debug: Print first vertex's all attribute values for comparison
+        print("\n=== Debug: First vertex (VTX 0) attribute values ===")
+        
+        for vtx in range(num_vertices):
             vertex = {}
             
-            # Process all attributes - use VTX index to read from PostVS buffer
-            for attr_idx, attr in enumerate(attrs):
-                offset = attr_offsets[attr_idx] + attr.mesh.vertexByteStride * vtx
-                
-                if offset < len(buffer_data):
-                    value = self._unpack_data(attr.format, buffer_data, offset)
+            # Read all attributes
+            for attr in attrs:
+                offset = attr.offset + postvs.vertexByteStride * vtx
+                if offset < len(output_buffer):
+                    value = self._unpack_data(attr.format, output_buffer, offset)
                     if value:
-                        # Check if this is position attribute
-                        if attr_idx == position_attr_idx:
-                            vertex['position'] = (value[0], value[1], value[2] if len(value) > 2 else 0.0)
-                        else:
-                            vertex[attr.name] = value
+                        vertex[attr.name] = value
+                        # Debug first vertex
+                        if vtx == 0:
+                            print("  {}: {} (offset={})".format(attr.name, value, offset))
             
-            # Ensure position exists
-            if 'position' not in vertex:
+            if vtx == 0:
+                print("=== End debug ===\n")
+            
+            # Extract position
+            if position_attr and position_attr.name in vertex:
+                pos_value = vertex[position_attr.name]
+                vertex['position'] = (
+                    float(pos_value[0]),
+                    float(pos_value[1]),
+                    float(pos_value[2]) if len(pos_value) > 2 else 0.0
+                )
+            else:
                 vertex['position'] = (0.0, 0.0, 0.0)
             
-            vertex_data_by_idx[idx] = vertex
+            # Extract UV
+            uv_value = (0.0, 0.0)
+            if texcoord0_attr and texcoord0_attr.name in vertex:
+                uv_data_value = vertex[texcoord0_attr.name]
+                if uv_data_value and len(uv_data_value) >= 2:
+                    uv_value = (float(uv_data_value[0]), float(uv_data_value[1]))
+                    if vtx < 10:  # Debug first few
+                        print("  VTX {}: TEXCOORD0[{}] = {} -> UV = ({}, {})".format(
+                            vtx, texcoord0_attr.name, uv_data_value, uv_value[0], uv_value[1]))
+                else:
+                    if vtx < 5:
+                        print("  VTX {}: TEXCOORD0 data invalid: {}".format(vtx, uv_data_value))
+            else:
+                if vtx < 5:
+                    print("  VTX {}: TEXCOORD0 not found in vertex. Available keys: {}".format(
+                        vtx, list(vertex.keys())))
+            
+            vertices_data.append(vertex)
+            uv_data.append(uv_value)
         
-        # Sort vertices by IDX and create vertex list
+        # Now deduplicate vertices by IDX (like reference C++ code)
+        # Create mapping: IDX -> vertex data
+        vertex_data_by_idx = {}
+        for vtx in range(num_vertices):
+            idx = indices[vtx] if vtx < len(indices) else vtx
+            if idx not in vertex_data_by_idx:
+                vertex_data_by_idx[idx] = vertices_data[vtx]
+        
+        # Sort vertices by IDX
         sorted_indices = sorted(vertex_data_by_idx.keys())
         vertices = [vertex_data_by_idx[idx] for idx in sorted_indices]
         
-        # Create index mapping: IDX -> vertex index in sorted list (0-based)
+        # Create index mapping: IDX -> vertex index in sorted list
         idx_to_vertex_idx = {idx: i for i, idx in enumerate(sorted_indices)}
         
-        # Create display indices: for each IDX in the original index array, map to vertex index
-        # This preserves the triangle structure (3 IDX per triangle)
-        display_indices = [idx_to_vertex_idx[indices[i]] for i in range(num_indices)]
+        # Create display indices: map original IDX to sorted vertex index
+        display_indices = []
+        for vtx in range(num_vertices):
+            idx = indices[vtx] if vtx < len(indices) else vtx
+            display_indices.append(idx_to_vertex_idx[idx])
         
-        return vertices, display_indices
+        # UV data should be in VTX order (already collected above)
+        # But we need to map it to sorted vertex order for ByControlPoint mapping
+        # Actually, for ByControlPoint, we need UV per control point (sorted by IDX)
+        uv_data_by_idx = {}
+        for vtx in range(num_vertices):
+            idx = indices[vtx] if vtx < len(indices) else vtx
+            if idx not in uv_data_by_idx:
+                uv_data_by_idx[idx] = uv_data[vtx]
+        
+        # Create UV data in sorted order
+        raw_uv_data = [uv_data_by_idx[idx] for idx in sorted_indices]
+        
+        return vertices, display_indices, raw_uv_data
     
     def _get_mixed_mesh(self, controller: rd.ReplayController,
                        action: rd.ActionDescription) -> Tuple[List[Dict], List[int]]:
@@ -460,11 +483,25 @@ class MeshExporter:
         if vs is None:
             raise RuntimeError("Could not get vertex shader reflection")
         
-        # Build VS output attributes (excluding position)
-        output_attrs = []
+        # Build all VS output attributes first to calculate correct offsets
+        # IMPORTANT: Filter attributes like mesh_attribute_printer does
+        all_attrs = []
+        position_attr = None
+        
+        pipe = controller.GetPipelineState()
+        
         for sig in vs.outputSignature:
-            if sig.systemValue == rd.ShaderBuiltin.Position:
-                continue  # Skip position, use input instead
+            # Skip if not on rasterized stream (like mesh_attribute_printer)
+            if pipe.GetRasterizedStream() >= 0:
+                if sig.stream != pipe.GetRasterizedStream():
+                    continue
+            else:
+                if sig.stream != 0:
+                    continue
+            
+            # Skip output indices (like mesh_attribute_printer)
+            if sig.systemValue == rd.ShaderBuiltin.OutputIndices:
+                continue
             
             attr = MeshAttribute()
             attr.mesh = postvs
@@ -474,26 +511,64 @@ class MeshExporter:
             attr.format.compType = rd.VarTypeCompType(sig.varType)
             attr.format.type = rd.ResourceFormatType.Regular
             attr.name = sig.semanticIdxName if sig.varName == '' else sig.varName
-            output_attrs.append(attr)
+            
+            if sig.systemValue == rd.ShaderBuiltin.Position:
+                position_attr = attr
+            
+            all_attrs.append(attr)
         
-        # Calculate offsets for output attributes
+        # Do NOT reorder Position - keep original shader output signature order
+        # This matches mesh_attribute_printer's approach
+        
+        # Calculate offsets for ALL attributes (including position)
+        # Use same alignment calculation as mesh_attribute_printer
         accum_offset = 0
-        for attr in output_attrs:
+        print("Calculating PostVS offsets:")
+        for attr in all_attrs:
             fmt = attr.format
             elem_size = (8 if fmt.compByteWidth > 4 else 4)
-            alignment = elem_size
-            if fmt.compCount == 2:
-                alignment = elem_size * 2
-            elif fmt.compCount > 2:
-                alignment = elem_size * 4
             
-            pipe = controller.GetPipelineState()
+            # Use fixed 4x alignment like mesh_attribute_printer
+            alignment = elem_size * 4
+            
+            # Check alignment
             if pipe.HasAlignedPostVSData(rd.MeshDataStage.VSOut) and (accum_offset % alignment) != 0:
-                accum_offset += alignment - (accum_offset % alignment)
+                padding = alignment - (accum_offset % alignment)
+                accum_offset += padding
+                print("  Padding: {} bytes".format(padding))
             
             attr.mesh.vertexByteOffset = postvs.vertexByteOffset + accum_offset
+            print("  Attribute '{}' (compCount={}): offset={}, accum_offset={}".format(
+                attr.name, fmt.compCount, attr.mesh.vertexByteOffset, accum_offset))
+            
             accum_offset += elem_size * fmt.compCount
         
+        print("Calculated stride: {}, Actual stride: {}".format(accum_offset, postvs.vertexByteStride))
+            
+        # Now filter out Position for output_attrs (since we use VS Input for position)
+        # But keep the calculated offsets!
+        output_attrs = []
+        for attr in all_attrs:
+            # We identify position by checking if it was the one we found as system value Position
+            # Or by name if system value wasn't set (fallback)
+            is_position = False
+            if position_attr and attr == position_attr:
+                is_position = True
+            elif 'position' in attr.name.lower():
+                is_position = True
+                
+            if not is_position:
+                output_attrs.append(attr)
+        
+        # Pre-calculate output attribute offsets
+        output_attr_offsets = []
+        print("Output attributes and their offsets:")
+        for attr_idx, attr in enumerate(output_attrs):
+            offset = attr.mesh.vertexByteOffset
+            output_attr_offsets.append(offset)
+            print("  [{}] {}: offset={}, compCount={}".format(
+                attr_idx, attr.name, offset, attr.format.compCount))
+            
         # Get indices from VS INPUT (not PostVS) - we need VS input indices to read VS input positions correctly
         # These are the original buffer indices (IDX) that we'll use to read from VS input buffers
         input_indices = self._get_indices(controller, ib, action)
@@ -524,11 +599,6 @@ class MeshExporter:
             vb = vbs[position_input.vertexBuffer]
             position_offset_base = vb.byteOffset + position_input.byteOffset
         
-        # Pre-calculate output attribute offsets
-        output_attr_offsets = []
-        for attr in output_attrs:
-            output_attr_offsets.append(attr.mesh.vertexByteOffset)
-        
         # Get vertex data - use IDX as unique vertex identifier
         # For position: use IDX to get from VS input buffer
         # For other attributes: find VTX position for this IDX and read from PostVS buffer
@@ -542,6 +612,9 @@ class MeshExporter:
             if idx not in idx_to_vtx_positions:
                 idx_to_vtx_positions[idx] = []
             idx_to_vtx_positions[idx].append(vtx)
+        
+        # Also collect raw UV data in VTX order (for FBX export)
+        raw_uv_data = []  # UV data for each VTX position in order
         
         # Get vertex data for each unique IDX
         for idx in idx_to_vtx_positions.keys():
@@ -565,8 +638,11 @@ class MeshExporter:
                 vertex['position'] = (0.0, 0.0, 0.0)
             
             # Get other attributes from VS output (using VTX position - PostVS is in VTX order)
+            # Use exactly the same method as mesh_attribute_printer
             for attr_idx, attr in enumerate(output_attrs):
-                offset = output_attr_offsets[attr_idx] + attr.mesh.vertexByteStride * vtx
+                # Calculate offset exactly like mesh_attribute_printer: attr.offset + postvs.vertexByteStride * vtx
+                # where attr.offset = postvs.vertexByteOffset + accum_offset
+                offset = output_attr_offsets[attr_idx] + postvs.vertexByteStride * vtx
                 
                 if offset < len(output_buffer):
                     value = self._unpack_data(attr.format, output_buffer, offset)
@@ -574,6 +650,55 @@ class MeshExporter:
                         vertex[attr.name] = value
             
             vertex_data_by_idx[idx] = vertex
+        
+        # Collect raw UV data for each VTX position (in original order)
+        # Find TEXCOORD0 attribute (exact match only)
+        print("Available attributes in VS output (for mixed mesh):")
+        for attr_idx, attr in enumerate(output_attrs):
+            print("  [{}] {} (compCount={})".format(attr_idx, attr.name, attr.format.compCount))
+        
+        texcoord0_attr_idx = None
+        for attr_idx, attr in enumerate(output_attrs):
+            attr_name = attr.name.strip()
+            attr_name_lower = attr_name.lower()
+            # Exact match: TEXCOORD0 or TEXCOORDO (common typo)
+            # Also check compCount >= 2 to ensure it's a valid UV attribute
+            if (attr_name_lower == 'texcoord0' or attr_name_lower == 'texcoordo') and attr.format.compCount >= 2:
+                texcoord0_attr_idx = attr_idx
+                print("Found TEXCOORD0 attribute: '{}' at index {} (compCount={})".format(
+                    attr.name, attr_idx, attr.format.compCount))
+                break
+        
+        # Extract UV data directly from PostVS buffer using the same method as mesh_attribute_printer
+        # This ensures we read from the correct offset
+        uv_data_by_idx = {}  # {idx: uv_value}
+        
+        if texcoord0_attr_idx is not None:
+            texcoord0_attr = output_attrs[texcoord0_attr_idx]
+            texcoord0_offset = output_attr_offsets[texcoord0_attr_idx]
+            print("TEXCOORD0 attribute: '{}' at offset {} (compCount={})".format(
+                texcoord0_attr.name, texcoord0_offset, texcoord0_attr.format.compCount))
+            
+            # Read UV data for each unique IDX using the same VTX position as vertex_data_by_idx
+            for idx in vertex_data_by_idx.keys():
+                # Use the same VTX position that was used to read vertex data
+                vtx = idx_to_vtx_positions[idx][0]
+                
+                # Calculate offset exactly like mesh_attribute_printer does
+                # mesh_attribute_printer uses: attr.offset + postvs.vertexByteStride * vtx
+                # where attr.offset = postvs.vertexByteOffset + accum_offset
+                offset = texcoord0_offset + postvs.vertexByteStride * vtx
+                
+                uv_value = (0.0, 0.0)
+                if offset < len(output_buffer):
+                    value = self._unpack_data(texcoord0_attr.format, output_buffer, offset)
+                    if value and len(value) >= 2:
+                        uv_value = (float(value[0]), float(value[1]))
+                        print("  IDX {} (VTX {}): UV = ({}, {})".format(idx, vtx, uv_value[0], uv_value[1]))
+                
+                uv_data_by_idx[idx] = uv_value
+        else:
+            print("TEXCOORD0 not found, skipping UV data")
         
         # Sort vertices by IDX and create vertex list
         sorted_indices = sorted(vertex_data_by_idx.keys())
@@ -586,7 +711,15 @@ class MeshExporter:
         # This preserves the triangle structure (3 IDX per triangle)
         display_indices = [idx_to_vertex_idx[indices[i]] for i in range(num_indices)]
         
-        return vertices, display_indices
+        # Create raw_uv_data in the same order as sorted vertices (by IDX)
+        raw_uv_data = []
+        for idx in sorted_indices:
+            if idx in uv_data_by_idx:
+                raw_uv_data.append(uv_data_by_idx[idx])
+            else:
+                raw_uv_data.append((0.0, 0.0))
+        
+        return vertices, display_indices, raw_uv_data
     
     def _get_indices(self, controller: rd.ReplayController, ib: rd.BufferDescription,
                     action: rd.ActionDescription) -> List[int]:
@@ -716,8 +849,15 @@ class MeshExporter:
         
         return value
     
-    def _write_fbx(self, file_path: str, vertices: List[Dict], indices: List[int]):
-        """Write mesh data to FBX file (ASCII format)"""
+    def _write_fbx(self, file_path: str, vertices: List[Dict], indices: List[int], 
+                   raw_uv_data: Optional[List[Tuple]] = None):
+        """Write mesh data to FBX file (ASCII format)
+        
+        Args:
+            vertices: List of unique vertices (sorted by IDX)
+            indices: Display indices mapping to vertices
+            raw_uv_data: Optional list of UV data in original polygon vertex order
+        """
         if len(vertices) == 0:
             raise RuntimeError("No vertices to export")
         
@@ -822,9 +962,38 @@ class MeshExporter:
             # Write GeometryVersion
             f.write("\t\tGeometryVersion: 124\n")
             
-            # Write layer (minimal - no normals or UVs for now)
+            # Write UV data using ByControlPoint mapping
+            if raw_uv_data and len(raw_uv_data) > 0:
+                # Prepare UV data list
+                # Since ByControlPoint maps one-to-one with vertices, we just flatten the raw_uv_data
+                uv_data_flat = []
+                for uv in raw_uv_data:
+                    # Flip V coordinate (FBX convention)
+                    # Ensure we have valid float values
+                    u = float(uv[0]) if uv else 0.0
+                    v = float(uv[1]) if uv and len(uv) > 1 else 0.0
+                    uv_data_flat.extend([u, 1.0 - v])
+                
+                f.write("\t\tLayerElementUV: 0 {\n")
+                f.write("\t\t\tVersion: 101\n")
+                f.write("\t\t\tName: \"map1\"\n")
+                f.write("\t\t\tMappingInformationType: \"ByControlPoint\"\n")
+                f.write("\t\t\tReferenceInformationType: \"Direct\"\n")
+                f.write("\t\t\tUV: *{} {{\n".format(len(uv_data_flat)))
+                f.write("\t\t\t\ta: ")
+                f.write(",".join("{:.6f}".format(x) for x in uv_data_flat))
+                f.write("\n")
+                f.write("\t\t\t}\n")
+                f.write("\t\t}\n")
+            
+            # Write layer
             f.write("\t\tLayer: 0 {\n")
             f.write("\t\t\tVersion: 100\n")
+            if raw_uv_data and len(raw_uv_data) > 0:
+                f.write("\t\t\tLayerElement:  {\n")
+                f.write("\t\t\t\tType: \"LayerElementUV\"\n")
+                f.write("\t\t\t\tTypedIndex: 0\n")
+                f.write("\t\t\t}\n")
             f.write("\t\t}\n")
             
             f.write("\t}\n")
