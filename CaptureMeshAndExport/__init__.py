@@ -478,9 +478,44 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
             buffer_size
         )
     
-    # Batch read UV buffer if available (always from VS Output)
+    # Try to read UV from VS Input first (Attribute5 with 2 components)
+    # If not available, fall back to VS Output
+    use_vs_input_uv = False
+    vs_input_uv_data = None
+    vs_input_uv_attr = None
     uv_buffer = None
-    if uv_attr is not None:
+    
+    if action is not None and vbs is not None:
+        debug_write("\nTrying to find UV in VS Input...")
+        pipe = controller.GetPipelineState()
+        inputs = pipe.GetVertexInputs()
+        
+        # Look for Attribute5 with 2 components (UV)
+        for input_attr in inputs:
+            if input_attr.name.upper() == 'ATTRIBUTE5' and input_attr.format.compCount == 2:
+                vs_input_uv_attr = input_attr
+                debug_write("Found Attribute5 (UV) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
+                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
+                break
+        
+        if vs_input_uv_attr is not None:
+            # Batch read VS Input UV buffer
+            vb = vbs[vs_input_uv_attr.vertexBuffer]
+            if vb.resourceId != rd.ResourceId.Null():
+                max_idx = max(indices) if indices else 0
+                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
+                debug_write("Reading VS Input UV buffer: size={}".format(buffer_size))
+                vs_input_uv_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
+                use_vs_input_uv = True
+                debug_write("Using UV from VS Input (Attribute5)")
+            else:
+                debug_write("WARNING: VS Input UV buffer resource ID is Null")
+        else:
+            debug_write("No Attribute5 found in VS Input, will try VS Output")
+    
+    # Fall back to VS Output UV if VS Input UV not available
+    if not use_vs_input_uv and uv_attr is not None:
+        debug_write("Using UV from VS Output (TEXCOORD)")
         max_idx = max(indices) if indices else 0
         num_vertices = max_idx + 1
         uv_buffer_size = uv_attr.vertexByteOffset + uv_attr.vertexByteStride * num_vertices
@@ -556,8 +591,20 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
         # Take first 3 components for position
         pos = (float(pos_value[0]), float(pos_value[1]), float(pos_value[2]) if len(pos_value) > 2 else 0.0)
         
-        # Get UV from VS Output (using VTX, not IDX!)
-        if uv_attr is not None and uv_buffer is not None:
+        # Get UV from VS Input (using IDX) or VS Output (using VTX)
+        if use_vs_input_uv and vs_input_uv_attr is not None and vs_input_uv_data is not None:
+            # Read UV from VS Input using IDX (same as position)
+            vb = vbs[vs_input_uv_attr.vertexBuffer]
+            uv_offset = (vb.byteOffset + vs_input_uv_attr.byteOffset + 
+                        vb.byteStride * (idx + action.vertexOffset))
+            if uv_offset + vs_input_uv_attr.format.compByteWidth * vs_input_uv_attr.format.compCount <= len(vs_input_uv_data):
+                uv_data_bytes = vs_input_uv_data[uv_offset:uv_offset + vs_input_uv_attr.format.compByteWidth * vs_input_uv_attr.format.compCount]
+                uv_value = unpackData(vs_input_uv_attr.format, uv_data_bytes)
+                uv = (float(uv_value[0]), float(uv_value[1]) if len(uv_value) > 1 else 0.0)
+            else:
+                uv = (0.0, 0.0)
+        elif uv_attr is not None and uv_buffer is not None:
+            # Fall back to VS Output (using VTX, not IDX!)
             uv_offset = uv_attr.vertexByteStride * vtx  # VS Output uses VTX, not IDX!
             if uv_offset + uv_attr.format.compByteWidth * uv_attr.format.compCount <= len(uv_buffer):
                 uv_data_bytes = uv_buffer[uv_offset:uv_offset + uv_attr.vertexByteStride]
@@ -688,19 +735,55 @@ def writeFBX(vertices, polygon_indices, uv_data, filepath):
         f.write("\t\tGeometryVersion: 124\n")
         
         # UV Layer
+        # Use ByPolygonVertex + IndexToDirect (like UE exports)
+        # This allows each polygon vertex to reference a unique UV, even if vertices share positions
         if uv_data and len(uv_data) > 0:
+            # Create unique UV list and UVIndex array
+            # UVIndex maps each polygon vertex to a UV in the UV array
+            unique_uvs = []
+            uv_to_index = {}
+            uv_indices = []
+            
+            # Build unique UV list and index mapping
+            for uv in uv_data:
+                # Flip V coordinate for FBX convention
+                uv_flipped = (uv[0], 1.0 - uv[1])
+                if uv_flipped not in uv_to_index:
+                    uv_to_index[uv_flipped] = len(unique_uvs)
+                    unique_uvs.append(uv_flipped)
+                uv_indices.append(uv_to_index[uv_flipped])
+            
+            # UVIndex should match polygon_indices (one UV index per polygon vertex)
+            # Since we deduplicated vertices, each polygon_indices[i] corresponds to uv_data[polygon_indices[i]]
+            # But we need to map polygon vertices to UV indices
+            # For ByPolygonVertex, we need one UV index per polygon vertex (same order as polygon_indices)
+            polygon_uv_indices = []
+            for idx in polygon_indices:
+                # idx is the vertex index in the deduplicated vertices list
+                # uv_data[idx] is the UV for that vertex
+                uv = uv_data[idx]
+                uv_flipped = (uv[0], 1.0 - uv[1])
+                if uv_flipped not in uv_to_index:
+                    uv_to_index[uv_flipped] = len(unique_uvs)
+                    unique_uvs.append(uv_flipped)
+                polygon_uv_indices.append(uv_to_index[uv_flipped])
+            
             f.write("\t\tLayerElementUV: 0 {\n")
             f.write("\t\t\tVersion: 101\n")
             f.write("\t\t\tName: \"map1\"\n")
-            f.write("\t\t\tMappingInformationType: \"ByControlPoint\"\n")
-            f.write("\t\t\tReferenceInformationType: \"Direct\"\n")
-            f.write("\t\t\tUV: *{} {{\n".format(len(uv_data) * 2))
+            f.write("\t\t\tMappingInformationType: \"ByPolygonVertex\"\n")
+            f.write("\t\t\tReferenceInformationType: \"IndexToDirect\"\n")
+            f.write("\t\t\tUV: *{} {{\n".format(len(unique_uvs) * 2))
             f.write("\t\t\t\ta: ")
             uv_strs = []
-            for uv in uv_data:
-                # Flip V coordinate for FBX convention
-                uv_strs.append("{:.6f},{:.6f}".format(uv[0], 1.0 - uv[1]))
+            for uv in unique_uvs:
+                uv_strs.append("{:.6f},{:.6f}".format(uv[0], uv[1]))
             f.write(",".join(uv_strs))
+            f.write("\n")
+            f.write("\t\t\t}\n")
+            f.write("\t\t\tUVIndex: *{} {{\n".format(len(polygon_uv_indices)))
+            f.write("\t\t\t\ta: ")
+            f.write(",".join(str(idx) for idx in polygon_uv_indices))
             f.write("\n")
             f.write("\t\t\t}\n")
             f.write("\t\t}\n")
