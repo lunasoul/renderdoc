@@ -1,0 +1,10 @@
+{
+    "extension_api": 1,
+    "name": "CaptureMeshAndExport",
+    "version": "1.0.0",
+    "minimum_renderdoc": "1.12",
+    "description": "Capture mesh data from current event and export to FBX format",
+    "author": "RenderDoc Extension",
+    "url": "https://github.com/baldurk/renderdoc"
+}
+
