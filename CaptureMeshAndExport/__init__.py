@@ -535,7 +535,70 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
     
     # Step 1: Extract vertex data for each VTX in order
     # For each VTX: read position from VS Input (using IDX), read UV from VS Output (using VTX)
-    vertex_data_by_vtx = {}  # Maps VTX -> (position, uv)
+    # Also read normal from VS Input Attribute1 (using IDX)
+    vertex_data_by_vtx = {}  # Maps VTX -> (position, uv, normal)
+    
+    # Try to read normal from VS Input Attribute2
+    # Attribute1 is likely TangentU, Attribute2 is likely Normal
+    use_vs_input_normal = False
+    vs_input_normal_data = None
+    vs_input_normal_attr = None
+    
+    # Also try to read tangent from Attribute1
+    use_vs_input_tangent = False
+    vs_input_tangent_data = None
+    vs_input_tangent_attr = None
+    
+    if action is not None and vbs is not None:
+        debug_write("\nTrying to find Normal (Attribute2) and TangentU (Attribute1) in VS Input...")
+        pipe = controller.GetPipelineState()
+        inputs = pipe.GetVertexInputs()
+        
+        # Look for Attribute2 with 3 or 4 components (normal vector)
+        for input_attr in inputs:
+            if input_attr.name.upper() == 'ATTRIBUTE2' and input_attr.format.compCount >= 3:
+                vs_input_normal_attr = input_attr
+                debug_write("Found Attribute2 (Normal) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
+                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
+                break
+        
+        # Look for Attribute1 with 3 or 4 components (tangent vector)
+        for input_attr in inputs:
+            if input_attr.name.upper() == 'ATTRIBUTE1' and input_attr.format.compCount >= 3:
+                vs_input_tangent_attr = input_attr
+                debug_write("Found Attribute1 (TangentU) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
+                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
+                break
+        
+        if vs_input_normal_attr is not None:
+            # Batch read VS Input normal buffer
+            vb = vbs[vs_input_normal_attr.vertexBuffer]
+            if vb.resourceId != rd.ResourceId.Null():
+                max_idx = max(indices) if indices else 0
+                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
+                debug_write("Reading VS Input Normal buffer: size={}".format(buffer_size))
+                vs_input_normal_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
+                use_vs_input_normal = True
+                debug_write("Using Normal from VS Input (Attribute2)")
+            else:
+                debug_write("WARNING: VS Input Normal buffer resource ID is Null")
+        else:
+            debug_write("No Attribute2 found in VS Input for normal")
+        
+        if vs_input_tangent_attr is not None:
+            # Batch read VS Input tangent buffer
+            vb = vbs[vs_input_tangent_attr.vertexBuffer]
+            if vb.resourceId != rd.ResourceId.Null():
+                max_idx = max(indices) if indices else 0
+                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
+                debug_write("Reading VS Input Tangent buffer: size={}".format(buffer_size))
+                vs_input_tangent_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
+                use_vs_input_tangent = True
+                debug_write("Using TangentU from VS Input (Attribute1)")
+            else:
+                debug_write("WARNING: VS Input Tangent buffer resource ID is Null")
+        else:
+            debug_write("No Attribute1 found in VS Input for tangent")
     
     debug_write("Extracting vertex data for each VTX...")
     # Debug: log first few indices to understand the pattern
@@ -615,19 +678,54 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
         else:
             uv = (0.0, 0.0)
         
+        # Get Normal from VS Input (using IDX, same as position)
+        normal = (0.0, 0.0, 1.0)  # Default normal (up)
+        if use_vs_input_normal and vs_input_normal_attr is not None and vs_input_normal_data is not None:
+            # Read normal from VS Input using IDX (same as position)
+            vb = vbs[vs_input_normal_attr.vertexBuffer]
+            normal_offset = (vb.byteOffset + vs_input_normal_attr.byteOffset + 
+                           vb.byteStride * (idx + action.vertexOffset))
+            if normal_offset + vs_input_normal_attr.format.compByteWidth * vs_input_normal_attr.format.compCount <= len(vs_input_normal_data):
+                normal_data_bytes = vs_input_normal_data[normal_offset:normal_offset + vs_input_normal_attr.format.compByteWidth * vs_input_normal_attr.format.compCount]
+                normal_value = unpackData(vs_input_normal_attr.format, normal_data_bytes)
+                # Take first 3 components for normal (ignore w component if present)
+                normal = (float(normal_value[0]), float(normal_value[1]), float(normal_value[2]) if len(normal_value) > 2 else 0.0)
+            else:
+                debug_write("WARNING: VTX {} (IDX {}): normal offset {} >= buffer size {}".format(
+                    vtx, idx, normal_offset, len(vs_input_normal_data)))
+        
+        # Get Tangent from VS Input (using IDX, same as position and normal)
+        tangent = (1.0, 0.0, 0.0)  # Default tangent (right)
+        if use_vs_input_tangent and vs_input_tangent_attr is not None and vs_input_tangent_data is not None:
+            # Read tangent from VS Input using IDX (same as position and normal)
+            vb = vbs[vs_input_tangent_attr.vertexBuffer]
+            tangent_offset = (vb.byteOffset + vs_input_tangent_attr.byteOffset + 
+                            vb.byteStride * (idx + action.vertexOffset))
+            if tangent_offset + vs_input_tangent_attr.format.compByteWidth * vs_input_tangent_attr.format.compCount <= len(vs_input_tangent_data):
+                tangent_data_bytes = vs_input_tangent_data[tangent_offset:tangent_offset + vs_input_tangent_attr.format.compByteWidth * vs_input_tangent_attr.format.compCount]
+                tangent_value = unpackData(vs_input_tangent_attr.format, tangent_data_bytes)
+                # Take first 3 components for tangent (ignore w component if present)
+                tangent = (float(tangent_value[0]), float(tangent_value[1]), float(tangent_value[2]) if len(tangent_value) > 2 else 0.0)
+            else:
+                debug_write("WARNING: VTX {} (IDX {}): tangent offset {} >= buffer size {}".format(
+                    vtx, idx, tangent_offset, len(vs_input_tangent_data)))
+        
         # Store vertex data by VTX
-        vertex_data_by_vtx[vtx] = (pos, uv)
+        vertex_data_by_vtx[vtx] = (pos, uv, normal, tangent)
     
     # Step 2: Deduplicate vertices based on (position, uv) combination
     # This ensures vertices with same position AND same UV are merged
+    # Note: We don't include normal/tangent in deduplication key, as same vertex position can have different normals/tangents
     vertex_key_to_index = {}  # Maps (pos, uv) -> vertex index
     vertices = []
     uv_data = []
+    normal_data = []  # Store normals for each vertex
+    tangent_data = []  # Store tangents for each vertex
     vtx_to_vertex_idx = {}  # Maps VTX -> vertex index in deduplicated list
     
     debug_write("Deduplicating vertices based on (position, uv)...")
     for vtx in range(num_vertices):
-        pos, uv = vertex_data_by_vtx[vtx]
+        pos, uv, normal, tangent = vertex_data_by_vtx[vtx]
         key = (pos, uv)
         
         if key not in vertex_key_to_index:
@@ -635,7 +733,13 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
             vertex_idx = len(vertices)
             vertices.append(pos)
             uv_data.append(uv)
+            normal_data.append(normal)
+            tangent_data.append(tangent)
             vertex_key_to_index[key] = vertex_idx
+        else:
+            # Existing vertex - use its normal/tangent (or average if needed, but for now just use the first one)
+            # In practice, if position and UV are the same, normal/tangent should also be the same
+            pass
         
         vtx_to_vertex_idx[vtx] = vertex_key_to_index[key]
     
@@ -651,12 +755,14 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
     debug_write("  - Vertices: {}".format(len(vertices)))
     debug_write("  - Polygon indices: {}".format(len(polygon_indices)))
     debug_write("  - UV data: {}".format(len(uv_data)))
+    debug_write("  - Normal data: {}".format(len(normal_data)))
+    debug_write("  - Tangent data: {}".format(len(tangent_data)))
     debug_write("=" * 60)
     
-    return vertices, polygon_indices, uv_data
+    return vertices, polygon_indices, uv_data, normal_data, tangent_data
 
 
-def writeFBX(vertices, polygon_indices, uv_data, filepath):
+def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, filepath):
     """Write mesh data to FBX ASCII format"""
     num_vertices = len(vertices)
     num_polygons = len(polygon_indices) // 3  # Assuming triangles
@@ -787,14 +893,82 @@ def writeFBX(vertices, polygon_indices, uv_data, filepath):
             f.write("\n")
             f.write("\t\t\t}\n")
             f.write("\t\t}\n")
+        
+        # Normal Layer
+        # Use ByPolygonVertex + IndexToDirect (same as UV)
+        if normal_data and len(normal_data) > 0:
+            # Create unique normal list and NormalIndex array
+            unique_normals = []
+            normal_to_index = {}
             
-            f.write("\t\tLayer: 0 {\n")
-            f.write("\t\t\tVersion: 100\n")
+            # Build unique normal list and index mapping
+            for normal in normal_data:
+                # Normalize the normal vector
+                nx, ny, nz = normal[0], normal[1], normal[2]
+                length = (nx*nx + ny*ny + nz*nz) ** 0.5
+                if length > 0.0001:
+                    nx, ny, nz = nx/length, ny/length, nz/length
+                else:
+                    nx, ny, nz = 0.0, 0.0, 1.0  # Default to up if zero length
+                
+                normal_tuple = (nx, ny, nz)
+                if normal_tuple not in normal_to_index:
+                    normal_to_index[normal_tuple] = len(unique_normals)
+                    unique_normals.append(normal_tuple)
+            
+            # NormalIndex should match polygon_indices (one normal index per polygon vertex)
+            polygon_normal_indices = []
+            for idx in polygon_indices:
+                # idx is the vertex index in the deduplicated vertices list
+                # normal_data[idx] is the normal for that vertex
+                normal = normal_data[idx]
+                nx, ny, nz = normal[0], normal[1], normal[2]
+                length = (nx*nx + ny*ny + nz*nz) ** 0.5
+                if length > 0.0001:
+                    nx, ny, nz = nx/length, ny/length, nz/length
+                else:
+                    nx, ny, nz = 0.0, 0.0, 1.0
+                
+                normal_tuple = (nx, ny, nz)
+                if normal_tuple not in normal_to_index:
+                    normal_to_index[normal_tuple] = len(unique_normals)
+                    unique_normals.append(normal_tuple)
+                polygon_normal_indices.append(normal_to_index[normal_tuple])
+            
+            f.write("\t\tLayerElementNormal: 0 {\n")
+            f.write("\t\t\tVersion: 101\n")
+            f.write("\t\t\tName: \"\"\n")
+            f.write("\t\t\tMappingInformationType: \"ByPolygonVertex\"\n")
+            f.write("\t\t\tReferenceInformationType: \"IndexToDirect\"\n")
+            f.write("\t\t\tNormals: *{} {{\n".format(len(unique_normals) * 3))
+            f.write("\t\t\t\ta: ")
+            normal_strs = []
+            for normal in unique_normals:
+                normal_strs.append("{:.6f},{:.6f},{:.6f}".format(normal[0], normal[1], normal[2]))
+            f.write(",".join(normal_strs))
+            f.write("\n")
+            f.write("\t\t\t}\n")
+            f.write("\t\t\tNormalsIndex: *{} {{\n".format(len(polygon_normal_indices)))
+            f.write("\t\t\t\ta: ")
+            f.write(",".join(str(idx) for idx in polygon_normal_indices))
+            f.write("\n")
+            f.write("\t\t\t}\n")
+            f.write("\t\t}\n")
+        
+        # Write Layer section (combine UV and Normal if both exist)
+        f.write("\t\tLayer: 0 {\n")
+        f.write("\t\t\tVersion: 100\n")
+        if uv_data and len(uv_data) > 0:
             f.write("\t\t\tLayerElement:  {\n")
             f.write("\t\t\t\tType: \"LayerElementUV\"\n")
             f.write("\t\t\t\tTypedIndex: 0\n")
             f.write("\t\t\t}\n")
-            f.write("\t\t}\n")
+        if normal_data and len(normal_data) > 0:
+            f.write("\t\t\tLayerElement:  {\n")
+            f.write("\t\t\t\tType: \"LayerElementNormal\"\n")
+            f.write("\t\t\t\tTypedIndex: 0\n")
+            f.write("\t\t\t}\n")
+        f.write("\t\t}\n")
         
         f.write("\t}\n")
         
@@ -918,7 +1092,7 @@ def capture_mesh_and_export_callback(ctx: qrd.CaptureContext, data):
                 
                 # Extract mesh data
                 debug_file.write("\nExtracting mesh data...\n")
-                vertices, polygon_indices, uv_data = extractMeshData(r, meshOutputs, action, debug_file)
+                vertices, polygon_indices, uv_data, normal_data, tangent_data = extractMeshData(r, meshOutputs, action, debug_file)
                 
                 if len(vertices) == 0:
                     raise RuntimeError("No vertices extracted")
@@ -928,7 +1102,9 @@ def capture_mesh_and_export_callback(ctx: qrd.CaptureContext, data):
                 debug_file.write("  - Vertices: {}\n".format(len(vertices)))
                 debug_file.write("  - Polygon indices: {}\n".format(len(polygon_indices)))
                 debug_file.write("  - UV data: {}\n".format(len(uv_data)))
-                writeFBX(vertices, polygon_indices, uv_data, file_path)
+                debug_file.write("  - Normal data: {}\n".format(len(normal_data)))
+                debug_file.write("  - Tangent data: {}\n".format(len(tangent_data)))
+                writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, file_path)
                 debug_file.write("FBX file written successfully!\n")
                 
                 # Close debug file
