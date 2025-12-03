@@ -80,163 +80,44 @@ def getIndices(controller, mesh, action=None, debug_file=None):
     indexFormat = str(mesh.numIndices) + indexFormat
 
     # If we have an index buffer
-    # IMPORTANT: Use VS Input index buffer (ib) instead of PostVS index buffer (mesh.indexResourceId)
-    # This is because VS Input indices (IDX) are what we need to read VS Input data correctly
-    pipe = controller.GetPipelineState()
-    ib = pipe.GetIBuffer()
-    
-    if ib.resourceId != rd.ResourceId.Null() and action is not None and (action.flags & rd.ActionFlags.Indexed):
-        # Use action values (VS Input indices)
-        base_vertex = action.baseVertex
-        index_offset = action.indexOffset
-        
-        # Following mesh_attribute_printer pattern: use ib.byteOffset + action.indexOffset * ib.byteStride
-        buffer_offset = ib.byteOffset + index_offset * ib.byteStride
-        buffer_size = ib.byteStride * action.numIndices
-        
-        debug_write("Using VS Input index buffer (ib) instead of PostVS index buffer")
-        debug_write("IBuffer: resourceId={}, byteOffset={}, byteStride={}".format(
-            ib.resourceId, ib.byteOffset, ib.byteStride))
-        debug_write("Using baseVertex={} (from action), indexOffset={} (from action)".format(
-            base_vertex, index_offset))
-        debug_write("Calculated buffer_offset={} (ib.byteOffset={} + indexOffset={} * stride={})".format(
-            buffer_offset, ib.byteOffset, index_offset, ib.byteStride))
-        
-        # Fetch the data
-        ibdata = controller.GetBufferData(ib.resourceId, buffer_offset, buffer_size)
-        debug_write("Fetched {} bytes from VS Input index buffer (requested {})".format(len(ibdata), buffer_size))
-        
-        # Determine format
-        index_fmt = 'B'
-        if ib.byteStride == 2:
-            index_fmt = 'H'
-        elif ib.byteStride == 4:
-            index_fmt = 'I'
-        
-        index_fmt = '=' + index_fmt  # Use native byte order
-        
-        # Unpack all indices
-        num_indices = action.numIndices
-        indices = []
-        
-        for i in range(num_indices):
-            idx_offset = i * ib.byteStride
-            if idx_offset + ib.byteStride <= len(ibdata):
-                idx = struct.unpack_from(index_fmt, ibdata, idx_offset)[0]
-                indices.append(idx + base_vertex)
-            else:
-                # Not enough data, use index as fallback
-                debug_write("WARNING: Not enough data for index {}, using fallback".format(i))
-                indices.append(i + base_vertex)
-        
-        # Debug: show first 5 raw indices (with bounds checking)
-        if len(ibdata) >= ib.byteStride:
-            raw_indices_debug = []
-            for i in range(min(5, len(indices))):
-                idx_offset = i * ib.byteStride
-                if idx_offset + ib.byteStride <= len(ibdata):
-                    raw_indices_debug.append(struct.unpack_from(index_fmt, ibdata, idx_offset)[0])
-                else:
-                    break
-            debug_write("First {} raw indices (before baseVertex): {}".format(len(raw_indices_debug), raw_indices_debug))
-        else:
-            debug_write("WARNING: Index buffer too small ({} bytes) to read indices".format(len(ibdata)))
-        
-        debug_write("First 5 indices (after baseVertex): {}".format(indices[:5] if len(indices) >= 5 else indices))
-        return indices
-    elif mesh.indexResourceId != rd.ResourceId.Null():
-        # Fallback: use PostVS index buffer (less reliable for VS Input reading)
-        debug_write("WARNING: Using PostVS index buffer (ib not available or not indexed)")
+    # Simplified approach like BatchExport: read entire buffer, then unpack from offset
+    if mesh.indexResourceId != rd.ResourceId.Null():
         # Use action values if provided, otherwise use mesh values
         base_vertex = action.baseVertex if action is not None else mesh.baseVertex
         index_offset = action.indexOffset if action is not None else mesh.indexOffset
         
-        # Read entire buffer from mesh.indexByteOffset, then use indexOffset as offset within
-        ibdata_full = controller.GetBufferData(mesh.indexResourceId, mesh.indexByteOffset, 0)
-        offset_in_buffer = index_offset * mesh.indexByteStride
+        # Fetch the entire index buffer data (simplified like BatchExport)
+        ibdata = controller.GetBufferData(mesh.indexResourceId, mesh.indexByteOffset, 0)
+        debug_write("Fetched {} bytes from index buffer (starting from byteOffset={})".format(
+            len(ibdata), mesh.indexByteOffset))
         
-        debug_write("IBuffer: resourceId={}, byteOffset={}, byteStride={}".format(
-            ib.resourceId, ib.byteOffset, ib.byteStride))
-        debug_write("mesh.indexByteOffset={}, mesh.indexOffset={}".format(
-            mesh.indexByteOffset, mesh.indexOffset))
-        debug_write("Using baseVertex={} (from {}), indexOffset={} (from {})".format(
-            base_vertex, "action" if action is not None else "mesh",
-            index_offset, "action" if action is not None else "mesh"))
-        debug_write("Read {} bytes from index buffer (starting from mesh.indexByteOffset={})".format(
-            len(ibdata_full), mesh.indexByteOffset))
-        debug_write("Offset within buffer: {} (indexOffset={} * stride={})".format(
-            offset_in_buffer, index_offset, mesh.indexByteStride))
+        # Unpack all indices, starting from the first index to fetch
+        offset = index_offset * mesh.indexByteStride
+        debug_write("Using baseVertex={}, indexOffset={}, offset in buffer={}".format(
+            base_vertex, index_offset, offset))
         
-        # Check if we have enough data
-        required_size = offset_in_buffer + mesh.indexByteStride * mesh.numIndices
-        if len(ibdata_full) < required_size:
-            debug_write("WARNING: Full buffer size {} < required size {}".format(len(ibdata_full), required_size))
-            # Try approach 2: mesh_attribute_printer pattern
-            buffer_offset = ib.byteOffset + index_offset * ib.byteStride
-            buffer_size = ib.byteStride * mesh.numIndices
-            debug_write("Trying alternative: buffer_offset={} (ib.byteOffset={} + indexOffset={} * stride={})".format(
-                buffer_offset, ib.byteOffset, index_offset, ib.byteStride))
-            ibdata = controller.GetBufferData(mesh.indexResourceId, buffer_offset, buffer_size)
-            debug_write("Alternative read: {} bytes (requested {})".format(len(ibdata), buffer_size))
-            if len(ibdata) == 0 or len(ibdata) < mesh.indexByteStride:
-                # Fall back to using what we have from full buffer
-                debug_write("Alternative failed, using full buffer with available data")
-                ibdata = ibdata_full
-                # Adjust to available size
-                available_indices = (len(ibdata) - offset_in_buffer) // mesh.indexByteStride if len(ibdata) > offset_in_buffer else 0
-                if available_indices < mesh.numIndices:
-                    debug_write("Adjusting numIndices from {} to {} (available)".format(mesh.numIndices, available_indices))
-                    num_indices = available_indices
-                else:
-                    num_indices = mesh.numIndices
-            else:
-                # Use alternative approach, offset is 0 in this data
-                offset_in_buffer = 0
-                num_indices = mesh.numIndices
-        else:
-            # Use full buffer approach
-            ibdata = ibdata_full
-            num_indices = mesh.numIndices
-        
-        debug_write("Fetched {} bytes from PostVS index buffer".format(len(ibdata)))
-        
-        # Check if we got any data
-        if len(ibdata) == 0:
-            raise RuntimeError("Failed to read index buffer: got 0 bytes")
-        
-        if len(ibdata) < offset_in_buffer + mesh.indexByteStride:
-            raise RuntimeError("Index buffer too small: got {} bytes, need at least {} bytes (offset={})".format(
-                len(ibdata), offset_in_buffer + mesh.indexByteStride, offset_in_buffer))
-        
-        # Unpack all indices (starting from offset_in_buffer in the fetched data)
-        indices = []
-        index_fmt = '=' + indexFormat[-1]  # Get format char (H, I, or B)
-        
-        for i in range(num_indices):
-            idx_offset = offset_in_buffer + i * mesh.indexByteStride
-            if idx_offset + mesh.indexByteStride <= len(ibdata):
-                idx = struct.unpack_from(index_fmt, ibdata, idx_offset)[0]
-                indices.append(idx + base_vertex)
-            else:
-                # Not enough data, use index as fallback
-                debug_write("WARNING: Not enough data for index {}, using fallback".format(i))
-                indices.append(i + base_vertex)
-        
-        # Debug: show first 5 raw indices (with bounds checking)
-        if len(ibdata) >= mesh.indexByteStride:
-            raw_indices_debug = []
-            for i in range(min(5, len(indices))):
-                idx_offset = offset_in_buffer + i * mesh.indexByteStride
+        try:
+            indices = struct.unpack_from(indexFormat, ibdata, offset)
+            # Apply the baseVertex offset
+            result = [i + base_vertex for i in indices]
+            debug_write("First 5 raw indices (before baseVertex): {}".format(list(indices[:5])))
+            debug_write("First 5 indices (after baseVertex): {}".format(result[:5]))
+            return result
+        except struct.error as e:
+            debug_write("WARNING: Failed to unpack indices: {}. Buffer size: {}, offset: {}, required: {}".format(
+                str(e), len(ibdata), offset, offset + mesh.indexByteStride * mesh.numIndices))
+            # Fallback: try to read what we can
+            result = []
+            index_fmt = '=' + indexFormat[-1]  # Get format char (H, I, or B)
+            for i in range(mesh.numIndices):
+                idx_offset = offset + i * mesh.indexByteStride
                 if idx_offset + mesh.indexByteStride <= len(ibdata):
-                    raw_indices_debug.append(struct.unpack_from(index_fmt, ibdata, idx_offset)[0])
+                    idx = struct.unpack_from(index_fmt, ibdata, idx_offset)[0]
+                    result.append(idx + base_vertex)
                 else:
-                    break
-            debug_write("First {} raw indices (before baseVertex): {}".format(len(raw_indices_debug), raw_indices_debug))
-        else:
-            debug_write("WARNING: Index buffer too small ({} bytes) to read indices".format(len(ibdata)))
-        
-        debug_write("First 5 indices (after baseVertex): {}".format(indices[:5] if len(indices) >= 5 else indices))
-        return indices
+                    debug_write("WARNING: Not enough data for index {}, using fallback".format(i))
+                    result.append(i + base_vertex)
+            return result
     else:
         # With no index buffer, just generate a range
         debug_write("No index buffer, generating range 0-{}".format(mesh.numIndices - 1))
@@ -321,12 +202,13 @@ def getMeshOutputs(controller, postvs):
 
 
 def extractMeshData(controller, meshData, action=None, debug_file=None):
-    """Extract vertex positions, indices, and UVs from mesh data
+    """Extract vertex positions, indices, UVs, normals, and tangents from VS Input
+    Following BatchExport approach: all data from VS Input, not VS Output
     
     Args:
         controller: ReplayController instance
-        meshData: List of MeshData objects from VS Output
-        action: ActionDescription (optional, used to read VS Input position if needed)
+        meshData: List of MeshData objects from VS Output (used for index buffer info)
+        action: ActionDescription (required to read VS Input data)
         debug_file: File handle for writing debug information (optional)
     """
     def debug_write(msg):
@@ -336,420 +218,219 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
             debug_file.flush()
     
     debug_write("=" * 60)
-    debug_write("CaptureMeshAndExport: Extracting mesh data")
-    debug_write("Number of mesh attributes: {}".format(len(meshData)))
+    debug_write("CaptureMeshAndExport: Extracting mesh data from VS Input")
+    debug_write("Following BatchExport approach: all attributes from VS Input")
     
-    indices = getIndices(controller, meshData[0], action, debug_file)
+    if action is None:
+        raise RuntimeError("Action is required to read VS Input data")
+    
+    # Get VS Input information
+    pipe = controller.GetPipelineState()
+    vbs = pipe.GetVBuffers()
+    inputs = pipe.GetVertexInputs()
+    ib = pipe.GetIBuffer()
+    
+    # Create MeshData-like structure for index buffer (like BatchExport)
+    class MeshInput:
+        def __init__(self):
+            self.indexResourceId = ib.resourceId
+            self.indexByteOffset = ib.byteOffset
+            self.indexByteStride = ib.byteStride
+            self.baseVertex = action.baseVertex
+            self.indexOffset = action.indexOffset
+            self.numIndices = action.numIndices
+    
+    mesh_input = MeshInput()
+    
+    # Get indices using simplified method
+    indices = getIndices(controller, mesh_input, action, debug_file)
     debug_write("Number of indices: {}".format(len(indices)))
-    debug_write("meshData[0].baseVertex: {}".format(meshData[0].baseVertex))
-    debug_write("meshData[0].indexOffset: {}".format(meshData[0].indexOffset))
     
     if len(indices) == 0:
         debug_write("WARNING: No indices found!")
-        return [], [], []
+        return [], [], [], [], []
     
-    # Find position and UV attributes in VS Output
-    # Prefer POSITION (local/world space) over SV_Position (screen space)
-    # According to official docs, SV_POSITION has systemValue == ShaderBuiltin.Position
-    # while POSITION is a regular output with systemValue == Undefined
+    # Find all VS Input attributes we need (like BatchExport)
     position_attr = None
-    sv_position_attr = None  # Fallback to SV_Position if POSITION not available
     uv_attr = None
+    normal_attr = None
+    tangent_attr = None
     
-    # Debug: collect all available attributes
-    available_attrs = []
-    debug_write("\nAvailable VS Output attributes:")
-    for attr in meshData:
-        name_upper = attr.name.upper()
-        system_val = getattr(attr, 'systemValue', rd.ShaderBuiltin.Undefined)
-        attr_info = "{} (systemValue={}, compCount={})".format(
-            attr.name, system_val, attr.format.compCount)
-        available_attrs.append(attr_info)
-        debug_write("  - {}".format(attr_info))
+    debug_write("\nScanning VS Input attributes...")
+    for attr in inputs:
+        if attr.perInstance:
+            continue
         
-        # Check if this is a position attribute
-        if name_upper.startswith('POSITION') and attr.format.compCount >= 3:
-            # SV_POSITION has systemValue == ShaderBuiltin.Position
-            # POSITION has systemValue != ShaderBuiltin.Position (usually Undefined)
-            if hasattr(attr, 'systemValue') and attr.systemValue == rd.ShaderBuiltin.Position:
-                # This is SV_POSITION (screen space coordinates)
-                sv_position_attr = attr
-                debug_write("    -> Found SV_POSITION (screen space)")
-            else:
-                # This is POSITION (local/world space coordinates)
-                # Prefer the first POSITION we find
-                if position_attr is None:
-                    position_attr = attr
-                    debug_write("    -> Found POSITION (local/world space)")
-        elif 'TEXCOORD' in name_upper and attr.format.compCount >= 2:
-            if uv_attr is None or 'TEXCOORD0' in name_upper:
+        debug_write("  - {}: compCount={}, vertexBuffer={}, byteOffset={}".format(
+            attr.name, attr.format.compCount, attr.vertexBuffer, attr.byteOffset))
+        
+        # Find position (usually Attribute0 with 3+ components)
+        if position_attr is None:
+            if attr.name.upper() == 'ATTRIBUTE0' and attr.format.compCount >= 3:
+                position_attr = attr
+                debug_write("    -> Found POSITION (Attribute0)")
+        
+        # Find UV (Attribute5 with 2 components)
+        if uv_attr is None:
+            if attr.name.upper() == 'ATTRIBUTE5' and attr.format.compCount == 2:
                 uv_attr = attr
-    
-    # If still no position found, try more flexible matching
-    if position_attr is None and sv_position_attr is None:
-        # Try to find any attribute with position-like name
-        for attr in meshData:
-            name_upper = attr.name.upper()
-            if ('POS' in name_upper or 'POSITION' in name_upper) and attr.format.compCount >= 3:
-                if hasattr(attr, 'systemValue') and attr.systemValue == rd.ShaderBuiltin.Position:
-                    sv_position_attr = attr
-                elif position_attr is None:
-                    position_attr = attr
-    
-    # If no POSITION in VS Output, try to read from VS Input (original local coordinates)
-    use_vs_input_position = False
-    vs_input_position_data = None
-    vs_input_position_attr = None
-    vbs = None
-    
-    if position_attr is None and action is not None:
-        debug_write("\nNo POSITION in VS Output, trying VS Input...")
-        # Try to get position from VS Input
-        pipe = controller.GetPipelineState()
-        vbs = pipe.GetVBuffers()
-        inputs = pipe.GetVertexInputs()
+                debug_write("    -> Found UV (Attribute5)")
         
-        debug_write("VS Input attributes:")
-        for i, input_attr in enumerate(inputs):
-            debug_write("  - {} (compCount={}, vertexBuffer={}, byteOffset={})".format(
-                input_attr.name, input_attr.format.compCount, 
-                input_attr.vertexBuffer, input_attr.byteOffset))
-            
-            # Check if this is POSITION by name
-            if input_attr.name.upper() == 'POSITION' and input_attr.format.compCount >= 3:
-                vs_input_position_attr = input_attr
-                debug_write("    -> Found POSITION in VS Input by name!")
-                break
+        # Find normal (Attribute2 with 3+ components)
+        if normal_attr is None:
+            if attr.name.upper() == 'ATTRIBUTE2' and attr.format.compCount >= 3:
+                normal_attr = attr
+                debug_write("    -> Found NORMAL (Attribute2)")
         
-        # If no explicit POSITION found, use the first attribute with 3+ components (usually position)
-        if vs_input_position_attr is None:
-            for i, input_attr in enumerate(inputs):
-                if input_attr.format.compCount >= 3:
-                    vs_input_position_attr = input_attr
-                    debug_write("    -> Using first attribute with 3+ components: {} (compCount={}) as position".format(
-                        input_attr.name, input_attr.format.compCount))
-                    break
-        
-        if vs_input_position_attr is not None:
-            # Batch read VS Input position buffer
-            vb = vbs[vs_input_position_attr.vertexBuffer]
-            if vb.resourceId != rd.ResourceId.Null():
-                max_idx = max(indices) if indices else 0
-                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
-                debug_write("Reading VS Input position buffer: size={}".format(buffer_size))
-                vs_input_position_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
-                use_vs_input_position = True
-                debug_write("Using POSITION from VS Input (original local coordinates)")
-            else:
-                debug_write("WARNING: VS Input position buffer resource ID is Null")
-        else:
-            debug_write("WARNING: No POSITION found in VS Input")
+        # Find tangent (Attribute1 with 3+ components)
+        if tangent_attr is None:
+            if attr.name.upper() == 'ATTRIBUTE1' and attr.format.compCount >= 3:
+                tangent_attr = attr
+                debug_write("    -> Found TANGENT (Attribute1)")
     
-    # Use POSITION from VS Output if available, otherwise use VS Input, finally fall back to SV_Position
-    if position_attr is None and not use_vs_input_position:
-        position_attr = sv_position_attr
-        if position_attr is not None:
-            debug_write("\nUsing SV_POSITION from VS Output (screen space coordinates)")
-        else:
-            # Provide detailed error message with available attributes
-            error_msg = "Could not find position attribute (POSITION or SV_Position) in mesh data.\n"
-            error_msg += "Available attributes: " + ", ".join(available_attrs) if available_attrs else "None"
-            debug_write("\nERROR: " + error_msg)
-            raise RuntimeError(error_msg)
-    elif position_attr is not None:
-        debug_write("\nUsing POSITION from VS Output: {} (systemValue={})".format(
-            position_attr.name, getattr(position_attr, 'systemValue', 'Unknown')))
+    if position_attr is None:
+        raise RuntimeError("Could not find position attribute (Attribute0) in VS Input")
     
-    # Batch read the entire vertex buffer to avoid thousands of API calls
-    # Only read VS Output position buffer if not using VS Input
+    # Batch read all vertex buffers (like BatchExport)
+    debug_write("\nBatch reading vertex buffers...")
+    # Note: indices already include baseVertex
+    base_vertex = action.baseVertex
+    max_idx = max(indices) if indices else 0
+    # Calculate relative indices (without baseVertex) for buffer size calculation
+    max_relative_idx = max_idx - base_vertex if max_idx >= base_vertex else 0
+    
+    # Read position buffer (like BatchExport: from vertexByteOffset, then parse by idx in memory)
     position_buffer = None
-    if not use_vs_input_position and position_attr is not None:
-        # Calculate the maximum index we need
-        max_idx = max(indices) if indices else 0
-        num_vertices = max_idx + 1
-        
-        # Calculate buffer size needed
-        buffer_size = position_attr.vertexByteOffset + position_attr.vertexByteStride * num_vertices
-        
-        # Batch read position buffer from VS Output
-        position_buffer = controller.GetBufferData(
-            position_attr.vertexResourceId,
-            position_attr.vertexByteOffset,
-            buffer_size
-        )
+    position_vb = None
+    position_vertex_byte_offset = 0
+    if position_attr:
+        position_vb = vbs[position_attr.vertexBuffer]
+        # Calculate vertexByteOffset like BatchExport
+        position_vertex_byte_offset = (position_attr.byteOffset + position_vb.byteOffset + 
+                                      action.vertexOffset * position_vb.byteStride)
+        # Read from vertexByteOffset, size = (max_relative_idx + 1) * stride
+        buffer_size = (max_relative_idx + 1) * position_vb.byteStride
+        position_buffer = controller.GetBufferData(position_vb.resourceId, position_vertex_byte_offset, buffer_size)
+        debug_write("Position buffer: size={}, vertexByteOffset={}, max_relative_idx={}".format(
+            len(position_buffer), position_vertex_byte_offset, max_relative_idx))
     
-    # Try to read UV from VS Input first (Attribute5 with 2 components)
-    # If not available, fall back to VS Output
-    use_vs_input_uv = False
-    vs_input_uv_data = None
-    vs_input_uv_attr = None
+    # Read UV buffer
     uv_buffer = None
+    uv_vb = None
+    uv_vertex_byte_offset = 0
+    if uv_attr:
+        uv_vb = vbs[uv_attr.vertexBuffer]
+        uv_vertex_byte_offset = (uv_attr.byteOffset + uv_vb.byteOffset + 
+                                action.vertexOffset * uv_vb.byteStride)
+        buffer_size = (max_relative_idx + 1) * uv_vb.byteStride
+        uv_buffer = controller.GetBufferData(uv_vb.resourceId, uv_vertex_byte_offset, buffer_size)
+        debug_write("UV buffer: size={}, vertexByteOffset={}".format(
+            len(uv_buffer), uv_vertex_byte_offset))
     
-    if action is not None and vbs is not None:
-        debug_write("\nTrying to find UV in VS Input...")
-        pipe = controller.GetPipelineState()
-        inputs = pipe.GetVertexInputs()
-        
-        # Look for Attribute5 with 2 components (UV)
-        for input_attr in inputs:
-            if input_attr.name.upper() == 'ATTRIBUTE5' and input_attr.format.compCount == 2:
-                vs_input_uv_attr = input_attr
-                debug_write("Found Attribute5 (UV) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
-                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
-                break
-        
-        if vs_input_uv_attr is not None:
-            # Batch read VS Input UV buffer
-            vb = vbs[vs_input_uv_attr.vertexBuffer]
-            if vb.resourceId != rd.ResourceId.Null():
-                max_idx = max(indices) if indices else 0
-                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
-                debug_write("Reading VS Input UV buffer: size={}".format(buffer_size))
-                vs_input_uv_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
-                use_vs_input_uv = True
-                debug_write("Using UV from VS Input (Attribute5)")
-            else:
-                debug_write("WARNING: VS Input UV buffer resource ID is Null")
-        else:
-            debug_write("No Attribute5 found in VS Input, will try VS Output")
+    # Read normal buffer
+    normal_buffer = None
+    normal_vb = None
+    normal_vertex_byte_offset = 0
+    if normal_attr:
+        normal_vb = vbs[normal_attr.vertexBuffer]
+        normal_vertex_byte_offset = (normal_attr.byteOffset + normal_vb.byteOffset + 
+                                     action.vertexOffset * normal_vb.byteStride)
+        buffer_size = (max_relative_idx + 1) * normal_vb.byteStride
+        normal_buffer = controller.GetBufferData(normal_vb.resourceId, normal_vertex_byte_offset, buffer_size)
+        debug_write("Normal buffer: size={}, vertexByteOffset={}".format(
+            len(normal_buffer), normal_vertex_byte_offset))
     
-    # Fall back to VS Output UV if VS Input UV not available
-    if not use_vs_input_uv and uv_attr is not None:
-        debug_write("Using UV from VS Output (TEXCOORD)")
-        max_idx = max(indices) if indices else 0
-        num_vertices = max_idx + 1
-        uv_buffer_size = uv_attr.vertexByteOffset + uv_attr.vertexByteStride * num_vertices
-        uv_buffer = controller.GetBufferData(
-            uv_attr.vertexResourceId,
-            uv_attr.vertexByteOffset,
-            uv_buffer_size
-        )
+    # Read tangent buffer
+    tangent_buffer = None
+    tangent_vb = None
+    tangent_vertex_byte_offset = 0
+    if tangent_attr:
+        tangent_vb = vbs[tangent_attr.vertexBuffer]
+        tangent_vertex_byte_offset = (tangent_attr.byteOffset + tangent_vb.byteOffset + 
+                                      action.vertexOffset * tangent_vb.byteStride)
+        buffer_size = (max_relative_idx + 1) * tangent_vb.byteStride
+        tangent_buffer = controller.GetBufferData(tangent_vb.resourceId, tangent_vertex_byte_offset, buffer_size)
+        debug_write("Tangent buffer: size={}, vertexByteOffset={}".format(
+            len(tangent_buffer), tangent_vertex_byte_offset))
     
-    # Key insight: VS Input uses IDX (original buffer index), VS Output uses VTX (display vertex index)
-    # PostVS data is stored in VTX order (0, 1, 2, ...), not IDX order
-    # Important: Each VTX may have different VS Output data even if they share the same IDX
-    # So we need to process each VTX individually, not group by IDX
+    # Extract vertex data for each index (like BatchExport)
+    debug_write("\nExtracting vertex data for each index...")
+    debug_write("baseVertex={}, max_idx={}, max_relative_idx={}".format(base_vertex, max_idx, max_relative_idx))
+    vertex_data_by_idx = {}  # Maps IDX -> (position, uv, normal, tangent)
     
-    num_vertices = len(indices)
-    debug_write("\nProcessing {} vertices (VTX order)...".format(num_vertices))
-    
-    # Step 1: Extract vertex data for each VTX in order
-    # For each VTX: read position from VS Input (using IDX), read UV from VS Output (using VTX)
-    # Also read normal from VS Input Attribute1 (using IDX)
-    vertex_data_by_vtx = {}  # Maps VTX -> (position, uv, normal)
-    
-    # Try to read normal from VS Input Attribute2
-    # Attribute1 is likely TangentU, Attribute2 is likely Normal
-    use_vs_input_normal = False
-    vs_input_normal_data = None
-    vs_input_normal_attr = None
-    
-    # Also try to read tangent from Attribute1
-    use_vs_input_tangent = False
-    vs_input_tangent_data = None
-    vs_input_tangent_attr = None
-    
-    if action is not None and vbs is not None:
-        debug_write("\nTrying to find Normal (Attribute2) and TangentU (Attribute1) in VS Input...")
-        pipe = controller.GetPipelineState()
-        inputs = pipe.GetVertexInputs()
-        
-        # Look for Attribute2 with 3 or 4 components (normal vector)
-        for input_attr in inputs:
-            if input_attr.name.upper() == 'ATTRIBUTE2' and input_attr.format.compCount >= 3:
-                vs_input_normal_attr = input_attr
-                debug_write("Found Attribute2 (Normal) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
-                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
-                break
-        
-        # Look for Attribute1 with 3 or 4 components (tangent vector)
-        for input_attr in inputs:
-            if input_attr.name.upper() == 'ATTRIBUTE1' and input_attr.format.compCount >= 3:
-                vs_input_tangent_attr = input_attr
-                debug_write("Found Attribute1 (TangentU) in VS Input: compCount={}, vertexBuffer={}, byteOffset={}".format(
-                    input_attr.format.compCount, input_attr.vertexBuffer, input_attr.byteOffset))
-                break
-        
-        if vs_input_normal_attr is not None:
-            # Batch read VS Input normal buffer
-            vb = vbs[vs_input_normal_attr.vertexBuffer]
-            if vb.resourceId != rd.ResourceId.Null():
-                max_idx = max(indices) if indices else 0
-                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
-                debug_write("Reading VS Input Normal buffer: size={}".format(buffer_size))
-                vs_input_normal_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
-                use_vs_input_normal = True
-                debug_write("Using Normal from VS Input (Attribute2)")
-            else:
-                debug_write("WARNING: VS Input Normal buffer resource ID is Null")
-        else:
-            debug_write("No Attribute2 found in VS Input for normal")
-        
-        if vs_input_tangent_attr is not None:
-            # Batch read VS Input tangent buffer
-            vb = vbs[vs_input_tangent_attr.vertexBuffer]
-            if vb.resourceId != rd.ResourceId.Null():
-                max_idx = max(indices) if indices else 0
-                buffer_size = vb.byteOffset + vb.byteStride * (max_idx + action.vertexOffset + 1)
-                debug_write("Reading VS Input Tangent buffer: size={}".format(buffer_size))
-                vs_input_tangent_data = controller.GetBufferData(vb.resourceId, 0, buffer_size)
-                use_vs_input_tangent = True
-                debug_write("Using TangentU from VS Input (Attribute1)")
-            else:
-                debug_write("WARNING: VS Input Tangent buffer resource ID is Null")
-        else:
-            debug_write("No Attribute1 found in VS Input for tangent")
-    
-    debug_write("Extracting vertex data for each VTX...")
-    # Debug: log first few indices to understand the pattern
-    if len(indices) > 0:
-        debug_write("First 10 indices: {}".format(indices[:10]))
-        debug_write("Last 10 indices: {}".format(indices[-10:]))
-        if action is not None:
-            debug_write("action.baseVertex: {}, action.vertexOffset: {}".format(
-                getattr(action, 'baseVertex', 'N/A'), action.vertexOffset))
-        if use_vs_input_position and vs_input_position_attr is not None:
-            vb = vbs[vs_input_position_attr.vertexBuffer]
-            debug_write("VS Input position buffer: stride={}, byteOffset={}, attr.byteOffset={}".format(
-                vb.byteStride, vb.byteOffset, vs_input_position_attr.byteOffset))
-    
-    for vtx in range(num_vertices):
-        idx = indices[vtx]
-        
-        # Get position from VS Input (using IDX)
-        # According to official decode_mesh example:
-        # - vertexByteOffset = attr.byteOffset + vb.byteOffset + draw.vertexOffset * vb.byteStride
-        # - offset = vertexByteOffset + vb.byteStride * idx
-        # - idx from getIndices already includes baseVertex
-        # So: offset = (attr.byteOffset + vb.byteOffset + vertexOffset * stride) + stride * idx
-        #    = attr.byteOffset + vb.byteOffset + stride * (idx + vertexOffset)
-        if use_vs_input_position and vs_input_position_data is not None:
-            # Read position from VS Input (original local coordinates) - use IDX
-            vb = vbs[vs_input_position_attr.vertexBuffer]
-            # Calculate offset following official example pattern
-            # vertexByteOffset equivalent: attr.byteOffset + vb.byteOffset + vertexOffset * stride
-            vertex_byte_offset = (vs_input_position_attr.byteOffset + vb.byteOffset + 
-                                 action.vertexOffset * vb.byteStride)
-            # Final offset: vertexByteOffset + stride * idx
-            offset = vertex_byte_offset + vb.byteStride * idx
-            if offset < len(vs_input_position_data):
-                pos_data = vs_input_position_data[offset:offset + vs_input_position_attr.format.compByteWidth * vs_input_position_attr.format.compCount]
-                pos_value = unpackData(vs_input_position_attr.format, pos_data)
-            else:
-                debug_write("WARNING: VTX {} (IDX {}): offset {} >= buffer size {}".format(
-                    vtx, idx, offset, len(vs_input_position_data)))
-                pos_value = (0.0, 0.0, 0.0)
-        else:
-            # Read position from VS Output (using VTX)
-            if position_buffer is not None:
-                pos_offset = position_attr.vertexByteStride * vtx
-                if pos_offset + position_attr.format.compByteWidth * position_attr.format.compCount <= len(position_buffer):
-                    pos_data = position_buffer[pos_offset:pos_offset + position_attr.vertexByteStride]
+    for idx in indices:
+        if idx not in vertex_data_by_idx:
+            # idx already includes baseVertex, so we need relative index for buffer access
+            relative_idx = idx - base_vertex
+            
+            # Read position (like BatchExport: full_buffer[relative_idx * stride])
+            if position_buffer and position_vb:
+                offset_in_buffer = relative_idx * position_vb.byteStride
+                if offset_in_buffer + position_attr.format.compByteWidth * position_attr.format.compCount <= len(position_buffer):
+                    pos_data = position_buffer[offset_in_buffer:offset_in_buffer + position_attr.format.compByteWidth * position_attr.format.compCount]
                     pos_value = unpackData(position_attr.format, pos_data)
+                    pos = (float(pos_value[0]), float(pos_value[1]), float(pos_value[2]) if len(pos_value) > 2 else 0.0)
                 else:
-                    pos_value = (0.0, 0.0, 0.0)
+                    debug_write("WARNING: Position offset {} out of bounds (buffer size: {}, relative_idx: {})".format(
+                        offset_in_buffer, len(position_buffer), relative_idx))
+                    pos = (0.0, 0.0, 0.0)
             else:
-                pos_value = (0.0, 0.0, 0.0)
-        
-        # Take first 3 components for position
-        pos = (float(pos_value[0]), float(pos_value[1]), float(pos_value[2]) if len(pos_value) > 2 else 0.0)
-        
-        # Get UV from VS Input (using IDX) or VS Output (using VTX)
-        if use_vs_input_uv and vs_input_uv_attr is not None and vs_input_uv_data is not None:
-            # Read UV from VS Input using IDX (same as position)
-            vb = vbs[vs_input_uv_attr.vertexBuffer]
-            uv_offset = (vb.byteOffset + vs_input_uv_attr.byteOffset + 
-                        vb.byteStride * (idx + action.vertexOffset))
-            if uv_offset + vs_input_uv_attr.format.compByteWidth * vs_input_uv_attr.format.compCount <= len(vs_input_uv_data):
-                uv_data_bytes = vs_input_uv_data[uv_offset:uv_offset + vs_input_uv_attr.format.compByteWidth * vs_input_uv_attr.format.compCount]
-                uv_value = unpackData(vs_input_uv_attr.format, uv_data_bytes)
-                uv = (float(uv_value[0]), float(uv_value[1]) if len(uv_value) > 1 else 0.0)
-            else:
-                uv = (0.0, 0.0)
-        elif uv_attr is not None and uv_buffer is not None:
-            # Fall back to VS Output (using VTX, not IDX!)
-            uv_offset = uv_attr.vertexByteStride * vtx  # VS Output uses VTX, not IDX!
-            if uv_offset + uv_attr.format.compByteWidth * uv_attr.format.compCount <= len(uv_buffer):
-                uv_data_bytes = uv_buffer[uv_offset:uv_offset + uv_attr.vertexByteStride]
-                uv_value = unpackData(uv_attr.format, uv_data_bytes)
-                uv = (float(uv_value[0]), float(uv_value[1]) if len(uv_value) > 1 else 0.0)
-            else:
-                uv = (0.0, 0.0)
-        else:
+                pos = (0.0, 0.0, 0.0)
+            
+            # Read UV
             uv = (0.0, 0.0)
-        
-        # Get Normal from VS Input (using IDX, same as position)
-        normal = (0.0, 0.0, 1.0)  # Default normal (up)
-        if use_vs_input_normal and vs_input_normal_attr is not None and vs_input_normal_data is not None:
-            # Read normal from VS Input using IDX (same as position)
-            vb = vbs[vs_input_normal_attr.vertexBuffer]
-            normal_offset = (vb.byteOffset + vs_input_normal_attr.byteOffset + 
-                           vb.byteStride * (idx + action.vertexOffset))
-            if normal_offset + vs_input_normal_attr.format.compByteWidth * vs_input_normal_attr.format.compCount <= len(vs_input_normal_data):
-                normal_data_bytes = vs_input_normal_data[normal_offset:normal_offset + vs_input_normal_attr.format.compByteWidth * vs_input_normal_attr.format.compCount]
-                normal_value = unpackData(vs_input_normal_attr.format, normal_data_bytes)
-                # Take first 3 components for normal (ignore w component if present)
-                normal = (float(normal_value[0]), float(normal_value[1]), float(normal_value[2]) if len(normal_value) > 2 else 0.0)
-            else:
-                debug_write("WARNING: VTX {} (IDX {}): normal offset {} >= buffer size {}".format(
-                    vtx, idx, normal_offset, len(vs_input_normal_data)))
-        
-        # Get Tangent from VS Input (using IDX, same as position and normal)
-        tangent = (1.0, 0.0, 0.0)  # Default tangent (right)
-        if use_vs_input_tangent and vs_input_tangent_attr is not None and vs_input_tangent_data is not None:
-            # Read tangent from VS Input using IDX (same as position and normal)
-            vb = vbs[vs_input_tangent_attr.vertexBuffer]
-            tangent_offset = (vb.byteOffset + vs_input_tangent_attr.byteOffset + 
-                            vb.byteStride * (idx + action.vertexOffset))
-            if tangent_offset + vs_input_tangent_attr.format.compByteWidth * vs_input_tangent_attr.format.compCount <= len(vs_input_tangent_data):
-                tangent_data_bytes = vs_input_tangent_data[tangent_offset:tangent_offset + vs_input_tangent_attr.format.compByteWidth * vs_input_tangent_attr.format.compCount]
-                tangent_value = unpackData(vs_input_tangent_attr.format, tangent_data_bytes)
-                # Take first 3 components for tangent (ignore w component if present)
-                tangent = (float(tangent_value[0]), float(tangent_value[1]), float(tangent_value[2]) if len(tangent_value) > 2 else 0.0)
-            else:
-                debug_write("WARNING: VTX {} (IDX {}): tangent offset {} >= buffer size {}".format(
-                    vtx, idx, tangent_offset, len(vs_input_tangent_data)))
-        
-        # Store vertex data by VTX
-        vertex_data_by_vtx[vtx] = (pos, uv, normal, tangent)
+            if uv_attr and uv_buffer and uv_vb:
+                offset_in_buffer = relative_idx * uv_vb.byteStride
+                if offset_in_buffer + uv_attr.format.compByteWidth * uv_attr.format.compCount <= len(uv_buffer):
+                    uv_data_bytes = uv_buffer[offset_in_buffer:offset_in_buffer + uv_attr.format.compByteWidth * uv_attr.format.compCount]
+                    uv_value = unpackData(uv_attr.format, uv_data_bytes)
+                    uv = (float(uv_value[0]), float(uv_value[1]) if len(uv_value) > 1 else 0.0)
+            
+            # Read normal
+            normal = (0.0, 0.0, 1.0)
+            if normal_attr and normal_buffer and normal_vb:
+                offset_in_buffer = relative_idx * normal_vb.byteStride
+                if offset_in_buffer + normal_attr.format.compByteWidth * normal_attr.format.compCount <= len(normal_buffer):
+                    normal_data_bytes = normal_buffer[offset_in_buffer:offset_in_buffer + normal_attr.format.compByteWidth * normal_attr.format.compCount]
+                    normal_value = unpackData(normal_attr.format, normal_data_bytes)
+                    normal = (float(normal_value[0]), float(normal_value[1]), float(normal_value[2]) if len(normal_value) > 2 else 0.0)
+            
+            # Read tangent
+            tangent = (1.0, 0.0, 0.0)
+            if tangent_attr and tangent_buffer and tangent_vb:
+                offset_in_buffer = relative_idx * tangent_vb.byteStride
+                if offset_in_buffer + tangent_attr.format.compByteWidth * tangent_attr.format.compCount <= len(tangent_buffer):
+                    tangent_data_bytes = tangent_buffer[offset_in_buffer:offset_in_buffer + tangent_attr.format.compByteWidth * tangent_attr.format.compCount]
+                    tangent_value = unpackData(tangent_attr.format, tangent_data_bytes)
+                    tangent = (float(tangent_value[0]), float(tangent_value[1]), float(tangent_value[2]) if len(tangent_value) > 2 else 0.0)
+            
+            vertex_data_by_idx[idx] = (pos, uv, normal, tangent)
     
-    # Step 2: Deduplicate vertices based on (position, uv) combination
-    # This ensures vertices with same position AND same UV are merged
-    # Note: We don't include normal/tangent in deduplication key, as same vertex position can have different normals/tangents
-    vertex_key_to_index = {}  # Maps (pos, uv) -> vertex index
+    # Deduplicate vertices based on (position, uv) - same as before
+    vertex_key_to_index = {}
     vertices = []
     uv_data = []
-    normal_data = []  # Store normals for each vertex
-    tangent_data = []  # Store tangents for each vertex
-    vtx_to_vertex_idx = {}  # Maps VTX -> vertex index in deduplicated list
+    normal_data = []
+    tangent_data = []
+    idx_to_vertex_idx = {}
     
-    debug_write("Deduplicating vertices based on (position, uv)...")
-    for vtx in range(num_vertices):
-        pos, uv, normal, tangent = vertex_data_by_vtx[vtx]
+    debug_write("\nDeduplicating vertices based on (position, uv)...")
+    for idx in indices:
+        pos, uv, normal, tangent = vertex_data_by_idx[idx]
         key = (pos, uv)
         
         if key not in vertex_key_to_index:
-            # New unique vertex
             vertex_idx = len(vertices)
             vertices.append(pos)
             uv_data.append(uv)
             normal_data.append(normal)
             tangent_data.append(tangent)
             vertex_key_to_index[key] = vertex_idx
-        else:
-            # Existing vertex - use its normal/tangent (or average if needed, but for now just use the first one)
-            # In practice, if position and UV are the same, normal/tangent should also be the same
-            pass
         
-        vtx_to_vertex_idx[vtx] = vertex_key_to_index[key]
+        idx_to_vertex_idx[idx] = vertex_key_to_index[key]
     
-    debug_write("Unique vertices after deduplication: {} (out of {} total VTX)".format(len(vertices), num_vertices))
-    
-    # Step 3: Create polygon indices by mapping VTX to vertex indices
-    polygon_indices = []
-    for vtx in range(num_vertices):
-        vertex_idx = vtx_to_vertex_idx[vtx]
-        polygon_indices.append(vertex_idx)
+    # Create polygon indices
+    polygon_indices = [idx_to_vertex_idx[idx] for idx in indices]
     
     debug_write("Extraction complete:")
     debug_write("  - Vertices: {}".format(len(vertices)))
@@ -895,62 +576,31 @@ def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, file
             f.write("\t\t}\n")
         
         # Normal Layer
-        # Use ByPolygonVertex + IndexToDirect (same as UV)
+        # Use ByPolygonVertex + Direct (like BatchExport)
         if normal_data and len(normal_data) > 0:
-            # Create unique normal list and NormalIndex array
-            unique_normals = []
-            normal_to_index = {}
-            
-            # Build unique normal list and index mapping
-            for normal in normal_data:
-                # Normalize the normal vector
-                nx, ny, nz = normal[0], normal[1], normal[2]
-                length = (nx*nx + ny*ny + nz*nz) ** 0.5
-                if length > 0.0001:
-                    nx, ny, nz = nx/length, ny/length, nz/length
-                else:
-                    nx, ny, nz = 0.0, 0.0, 1.0  # Default to up if zero length
-                
-                normal_tuple = (nx, ny, nz)
-                if normal_tuple not in normal_to_index:
-                    normal_to_index[normal_tuple] = len(unique_normals)
-                    unique_normals.append(normal_tuple)
-            
-            # NormalIndex should match polygon_indices (one normal index per polygon vertex)
-            polygon_normal_indices = []
+            # For Direct mode, we need normals in polygon vertex order (not unique list)
+            polygon_normals = []
             for idx in polygon_indices:
-                # idx is the vertex index in the deduplicated vertices list
-                # normal_data[idx] is the normal for that vertex
                 normal = normal_data[idx]
                 nx, ny, nz = normal[0], normal[1], normal[2]
                 length = (nx*nx + ny*ny + nz*nz) ** 0.5
                 if length > 0.0001:
                     nx, ny, nz = nx/length, ny/length, nz/length
                 else:
-                    nx, ny, nz = 0.0, 0.0, 1.0
-                
-                normal_tuple = (nx, ny, nz)
-                if normal_tuple not in normal_to_index:
-                    normal_to_index[normal_tuple] = len(unique_normals)
-                    unique_normals.append(normal_tuple)
-                polygon_normal_indices.append(normal_to_index[normal_tuple])
+                    nx, ny, nz = 0.0, 0.0, 1.0  # Default to up if zero length
+                polygon_normals.append((nx, ny, nz))
             
             f.write("\t\tLayerElementNormal: 0 {\n")
             f.write("\t\t\tVersion: 101\n")
             f.write("\t\t\tName: \"\"\n")
             f.write("\t\t\tMappingInformationType: \"ByPolygonVertex\"\n")
-            f.write("\t\t\tReferenceInformationType: \"IndexToDirect\"\n")
-            f.write("\t\t\tNormals: *{} {{\n".format(len(unique_normals) * 3))
+            f.write("\t\t\tReferenceInformationType: \"Direct\"\n")
+            f.write("\t\t\tNormals: *{} {{\n".format(len(polygon_normals) * 3))
             f.write("\t\t\t\ta: ")
             normal_strs = []
-            for normal in unique_normals:
+            for normal in polygon_normals:
                 normal_strs.append("{:.6f},{:.6f},{:.6f}".format(normal[0], normal[1], normal[2]))
             f.write(",".join(normal_strs))
-            f.write("\n")
-            f.write("\t\t\t}\n")
-            f.write("\t\t\tNormalsIndex: *{} {{\n".format(len(polygon_normal_indices)))
-            f.write("\t\t\t\ta: ")
-            f.write(",".join(str(idx) for idx in polygon_normal_indices))
             f.write("\n")
             f.write("\t\t\t}\n")
             f.write("\t\t}\n")
