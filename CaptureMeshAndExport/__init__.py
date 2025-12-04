@@ -201,7 +201,187 @@ def getMeshOutputs(controller, postvs):
     return meshOutputs
 
 
-def extractMeshData(controller, meshData, action=None, debug_file=None):
+def showAttributeMappingDialog(ctx, inputs):
+    """Show attribute mapping dialog and return user's mapping choices
+    
+    Args:
+        ctx: CaptureContext instance
+        inputs: List of VertexInput attributes from VS Input
+    
+    Returns:
+        Dictionary mapping attribute names to selected VS Input attribute names, or None if cancelled
+        Format: {'position': 'ATTRIBUTE0', 'normal': 'ATTRIBUTE2', 'tangent': 'ATTRIBUTE1', 'uv': 'ATTRIBUTE5'}
+    """
+    mqt = ctx.Extensions().GetMiniQtHelper()
+    
+    # Create dialog widget
+    dialog_widget = mqt.CreateToplevelWidget("Attribute Mapping", None)
+    dialog_widget.setWindowTitle("Attribute Mapping")
+    
+    # Create main vertical container
+    main_container = mqt.CreateVerticalContainer()
+    mqt.AddWidget(dialog_widget, main_container)
+    
+    # Get available VS Input attributes (non-instance attributes)
+    available_attrs = []
+    for attr in inputs:
+        if not attr.perInstance:
+            attr_display = "{} ({} components)".format(attr.name, attr.format.compCount)
+            available_attrs.append((attr.name, attr_display))
+    
+    if len(available_attrs) == 0:
+        ctx.Extensions().ErrorDialog("No vertex attributes found in VS Input", "Attribute Mapping Error")
+        return None
+    
+    # Create attribute options list (including "None" option)
+    attr_options = ["None"]
+    attr_name_map = {"None": None}  # Map display name to actual attribute name
+    for attr_name, attr_display in available_attrs:
+        attr_options.append(attr_display)
+        attr_name_map[attr_display] = attr_name
+    
+    # Store combo boxes and their selected values for later retrieval
+    combo_boxes = {}
+    combo_selected_values = {}  # Track selected values for each combo
+    
+    # Define attribute mappings to show
+    attribute_mappings = [
+        ("position", "Vertex Position", True, 3),  # (key, label, required, min_components)
+        ("normal", "Vertex Normal", False, 3),
+        ("tangent", "Vertex Tangent", False, 3),
+        ("uv", "UV", False, 2),
+    ]
+    
+    # Create mapping rows
+    for key, label, required, min_components in attribute_mappings:
+        # Create horizontal container for label and combo
+        row = mqt.CreateHorizontalContainer()
+        mqt.AddWidget(main_container, row)
+        
+        # Create label
+        label_widget = mqt.CreateLabel()
+        mqt.SetWidgetText(label_widget, label + ("" if not required else " *"))
+        mqt.AddWidget(row, label_widget)
+        
+        # Create combo box with callback to track selected value
+        def make_combo_changed(key=key):
+            def combo_changed(ctx, widget, data):
+                # data contains the selected text
+                combo_selected_values[key] = data
+            return combo_changed
+        
+        combo = mqt.CreateComboBox(False, make_combo_changed(key))
+        mqt.SetComboOptions(combo, attr_options)
+        
+        # Set default selection based on common patterns
+        default_attr = None
+        if key == "position":
+            # Try to find ATTRIBUTE0
+            for attr_name, attr_display in available_attrs:
+                if attr_name.upper() == "ATTRIBUTE0":
+                    default_attr = attr_display
+                    break
+        elif key == "normal":
+            # Try to find ATTRIBUTE2
+            for attr_name, attr_display in available_attrs:
+                if attr_name.upper() == "ATTRIBUTE2":
+                    default_attr = attr_display
+                    break
+        elif key == "tangent":
+            # Try to find ATTRIBUTE1
+            for attr_name, attr_display in available_attrs:
+                if attr_name.upper() == "ATTRIBUTE1":
+                    default_attr = attr_display
+                    break
+        elif key == "uv":
+            # Try to find ATTRIBUTE5
+            for attr_name, attr_display in available_attrs:
+                if attr_name.upper() == "ATTRIBUTE5":
+                    default_attr = attr_display
+                    break
+        
+        if default_attr:
+            mqt.SelectComboOption(combo, default_attr)
+            combo_selected_values[key] = default_attr  # Initialize selected value
+        elif required:
+            # For required attributes, select first non-None option
+            if len(attr_options) > 1:
+                mqt.SelectComboOption(combo, attr_options[1])
+                combo_selected_values[key] = attr_options[1]  # Initialize selected value
+        else:
+            # Initialize with "None" for optional attributes
+            combo_selected_values[key] = "None"
+        
+        mqt.AddWidget(row, combo)
+        combo_boxes[key] = combo
+    
+    # Dialog result storage (use list to allow modification in nested functions)
+    dialog_result = [True, {}]  # [cancelled, mapping]
+    
+    # Set up button callbacks
+    def on_cancel(ctx, widget, data):
+        dialog_result[0] = True
+        mqt.CloseCurrentDialog(False)
+    
+    def on_export(ctx, widget, data):
+        # Validate required attributes
+        mapping = {}
+        for key, label, required, min_components in attribute_mappings:
+            # Get selected text from tracked values (set by combo callback)
+            selected_text = combo_selected_values.get(key, "None")
+            if selected_text == "None":
+                if required:
+                    ctx.Extensions().ErrorDialog(
+                        "{} is required. Please select an attribute.".format(label),
+                        "Attribute Mapping Error"
+                    )
+                    return
+                mapping[key] = None
+            else:
+                attr_name = attr_name_map.get(selected_text)
+                if attr_name:
+                    # Verify component count
+                    for attr in inputs:
+                        if attr.name == attr_name and attr.format.compCount < min_components:
+                            ctx.Extensions().ErrorDialog(
+                                "{} requires at least {} components, but {} has only {}.".format(
+                                    label, min_components, attr_name, attr.format.compCount
+                                ),
+                                "Attribute Mapping Error"
+                            )
+                            return
+                    mapping[key] = attr_name
+                else:
+                    mapping[key] = None
+        
+        dialog_result[0] = False
+        dialog_result[1] = mapping
+        mqt.CloseCurrentDialog(True)
+    
+    # Create button container
+    button_container = mqt.CreateHorizontalContainer()
+    mqt.AddWidget(main_container, button_container)
+    
+    # Create Cancel button with callback
+    cancel_button = mqt.CreateButton(on_cancel)
+    mqt.SetWidgetText(cancel_button, "Cancel")
+    
+    # Create Export button with callback
+    export_button = mqt.CreateButton(on_export)
+    mqt.SetWidgetText(export_button, "Export")
+    
+    mqt.AddWidget(button_container, cancel_button)
+    mqt.AddWidget(button_container, export_button)
+    
+    # Show dialog
+    if mqt.ShowWidgetAsDialog(dialog_widget):
+        if not dialog_result[0]:  # Not cancelled
+            return dialog_result[1]  # Return mapping
+    
+    return None
+
+
+def extractMeshData(controller, meshData, action=None, attribute_mapping=None, debug_file=None):
     """Extract vertex positions, indices, UVs, normals, and tangents from VS Input
     Following BatchExport approach: all data from VS Input, not VS Output
     
@@ -209,6 +389,9 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
         controller: ReplayController instance
         meshData: List of MeshData objects from VS Output (used for index buffer info)
         action: ActionDescription (required to read VS Input data)
+        attribute_mapping: Dictionary mapping attribute names to VS Input attribute names
+                         Format: {'position': 'ATTRIBUTE0', 'normal': 'ATTRIBUTE2', 'tangent': 'ATTRIBUTE1', 'uv': 'ATTRIBUTE5'}
+                         If None, uses default hardcoded mapping
         debug_file: File handle for writing debug information (optional)
     """
     def debug_write(msg):
@@ -251,45 +434,82 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
         return [], [], [], [], []
     
     # Find all VS Input attributes we need (like BatchExport)
+    # Use attribute_mapping if provided, otherwise use default hardcoded mapping
+    if attribute_mapping is None:
+        # Default hardcoded mapping
+        attribute_mapping = {
+            'position': 'ATTRIBUTE0',
+            'normal': 'ATTRIBUTE2',
+            'tangent': 'ATTRIBUTE1',
+            'uv': 'ATTRIBUTE5'
+        }
+    
     position_attr = None
     uv_attr = None
     normal_attr = None
     tangent_attr = None
     
     debug_write("\nScanning VS Input attributes...")
+    debug_write("Using attribute mapping: {}".format(attribute_mapping))
+    
+    # Build a map of attribute names to attributes
+    attr_map = {}
     for attr in inputs:
         if attr.perInstance:
             continue
         
         debug_write("  - {}: compCount={}, vertexBuffer={}, byteOffset={}".format(
             attr.name, attr.format.compCount, attr.vertexBuffer, attr.byteOffset))
-        
-        # Find position (usually Attribute0 with 3+ components)
-        if position_attr is None:
-            if attr.name.upper() == 'ATTRIBUTE0' and attr.format.compCount >= 3:
+        attr_map[attr.name.upper()] = attr
+    
+    # Find attributes based on mapping
+    if attribute_mapping.get('position'):
+        attr_name = attribute_mapping['position'].upper()
+        if attr_name in attr_map:
+            attr = attr_map[attr_name]
+            if attr.format.compCount >= 3:
                 position_attr = attr
-                debug_write("    -> Found POSITION (Attribute0)")
-        
-        # Find UV (Attribute5 with 2 components)
-        if uv_attr is None:
-            if attr.name.upper() == 'ATTRIBUTE5' and attr.format.compCount == 2:
+                debug_write("    -> Found POSITION ({})".format(attr.name))
+            else:
+                debug_write("    -> WARNING: {} has only {} components, need at least 3".format(
+                    attr.name, attr.format.compCount))
+    
+    if attribute_mapping.get('uv'):
+        attr_name = attribute_mapping['uv'].upper()
+        if attr_name in attr_map:
+            attr = attr_map[attr_name]
+            if attr.format.compCount >= 2:
                 uv_attr = attr
-                debug_write("    -> Found UV (Attribute5)")
-        
-        # Find normal (Attribute2 with 3+ components)
-        if normal_attr is None:
-            if attr.name.upper() == 'ATTRIBUTE2' and attr.format.compCount >= 3:
+                debug_write("    -> Found UV ({})".format(attr.name))
+            else:
+                debug_write("    -> WARNING: {} has only {} components, need at least 2".format(
+                    attr.name, attr.format.compCount))
+    
+    if attribute_mapping.get('normal'):
+        attr_name = attribute_mapping['normal'].upper()
+        if attr_name in attr_map:
+            attr = attr_map[attr_name]
+            if attr.format.compCount >= 3:
                 normal_attr = attr
-                debug_write("    -> Found NORMAL (Attribute2)")
-        
-        # Find tangent (Attribute1 with 3+ components)
-        if tangent_attr is None:
-            if attr.name.upper() == 'ATTRIBUTE1' and attr.format.compCount >= 3:
+                debug_write("    -> Found NORMAL ({})".format(attr.name))
+            else:
+                debug_write("    -> WARNING: {} has only {} components, need at least 3".format(
+                    attr.name, attr.format.compCount))
+    
+    if attribute_mapping.get('tangent'):
+        attr_name = attribute_mapping['tangent'].upper()
+        if attr_name in attr_map:
+            attr = attr_map[attr_name]
+            if attr.format.compCount >= 3:
                 tangent_attr = attr
-                debug_write("    -> Found TANGENT (Attribute1)")
+                debug_write("    -> Found TANGENT ({})".format(attr.name))
+            else:
+                debug_write("    -> WARNING: {} has only {} components, need at least 3".format(
+                    attr.name, attr.format.compCount))
     
     if position_attr is None:
-        raise RuntimeError("Could not find position attribute (Attribute0) in VS Input")
+        raise RuntimeError("Could not find position attribute ({}) in VS Input".format(
+            attribute_mapping.get('position', 'ATTRIBUTE0')))
     
     # Batch read all vertex buffers (like BatchExport)
     debug_write("\nBatch reading vertex buffers...")
@@ -718,6 +938,35 @@ def capture_mesh_and_export_callback(ctx: qrd.CaptureContext, data):
         # Create debug file path (same directory as FBX file)
         debug_file_path = os.path.splitext(file_path)[0] + "_debug.txt"
         
+        # Get VS Input attributes in replay thread to show mapping dialog
+        vs_inputs = None
+        
+        def get_vs_inputs(r: rd.ReplayController):
+            """Get VS Input attributes for mapping dialog"""
+            nonlocal vs_inputs
+            try:
+                r.SetFrameEvent(event_id, True)
+                pipe = r.GetPipelineState()
+                vs_inputs = pipe.GetVertexInputs()
+            except Exception as e:
+                ctx.Extensions().ErrorDialog(
+                    "Failed to get VS Input attributes: {}".format(str(e)),
+                    "CaptureMeshAndExport Error"
+                )
+        
+        # Get VS Input attributes synchronously
+        ctx.Replay().BlockInvoke(get_vs_inputs)
+        
+        if vs_inputs is None:
+            return  # Failed to get VS Input
+        
+        # Show attribute mapping dialog
+        attribute_mapping = showAttributeMappingDialog(ctx, vs_inputs)
+        
+        # Check if user cancelled the dialog
+        if attribute_mapping is None:
+            return  # User cancelled
+        
         # Perform export in replay thread (async to avoid blocking UI)
         def do_export(r: rd.ReplayController):
             debug_file = None
@@ -728,6 +977,7 @@ def capture_mesh_and_export_callback(ctx: qrd.CaptureContext, data):
                 debug_file.write("=" * 60 + "\n")
                 debug_file.write("Event ID: {}\n".format(event_id))
                 debug_file.write("FBX File: {}\n".format(file_path))
+                debug_file.write("Attribute Mapping: {}\n".format(attribute_mapping))
                 debug_file.write("=" * 60 + "\n\n")
                 
                 # Set frame event (required for GetPostVSData)
@@ -757,9 +1007,10 @@ def capture_mesh_and_export_callback(ctx: qrd.CaptureContext, data):
                 debug_file.write("Action baseVertex: {}, indexOffset: {}, vertexOffset: {}\n".format(
                     action.baseVertex, action.indexOffset, action.vertexOffset))
                 
-                # Extract mesh data
+                # Extract mesh data with attribute mapping
                 debug_file.write("\nExtracting mesh data...\n")
-                vertices, polygon_indices, uv_data, normal_data, tangent_data = extractMeshData(r, meshOutputs, action, debug_file)
+                vertices, polygon_indices, uv_data, normal_data, tangent_data = extractMeshData(
+                    r, meshOutputs, action, attribute_mapping, debug_file)
                 
                 if len(vertices) == 0:
                     raise RuntimeError("No vertices extracted")
