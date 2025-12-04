@@ -432,15 +432,32 @@ def extractMeshData(controller, meshData, action=None, debug_file=None):
     # Create polygon indices
     polygon_indices = [idx_to_vertex_idx[idx] for idx in indices]
     
+    # Reverse winding order for each triangle to fix face orientation
+    # Original: [v0, v1, v2, v3, v4, v5, ...] (triangles: 0-1-2, 3-4-5, ...)
+    # Reversed: [v0, v2, v1, v3, v5, v4, ...] (triangles: 0-2-1, 3-5-4, ...)
+    reversed_polygon_indices = []
+    for i in range(0, len(polygon_indices), 3):
+        if i + 2 < len(polygon_indices):
+            # Reverse triangle: [v0, v1, v2] -> [v0, v2, v1]
+            reversed_polygon_indices.extend([
+                polygon_indices[i],
+                polygon_indices[i + 2],
+                polygon_indices[i + 1]
+            ])
+        else:
+            # Not enough vertices for a complete triangle, keep as is
+            reversed_polygon_indices.extend(polygon_indices[i:])
+    
     debug_write("Extraction complete:")
     debug_write("  - Vertices: {}".format(len(vertices)))
-    debug_write("  - Polygon indices: {}".format(len(polygon_indices)))
+    debug_write("  - Polygon indices (original): {}".format(len(polygon_indices)))
+    debug_write("  - Polygon indices (reversed): {}".format(len(reversed_polygon_indices)))
     debug_write("  - UV data: {}".format(len(uv_data)))
     debug_write("  - Normal data: {}".format(len(normal_data)))
     debug_write("  - Tangent data: {}".format(len(tangent_data)))
     debug_write("=" * 60)
     
-    return vertices, polygon_indices, uv_data, normal_data, tangent_data
+    return vertices, reversed_polygon_indices, uv_data, normal_data, tangent_data
 
 
 def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, filepath):
