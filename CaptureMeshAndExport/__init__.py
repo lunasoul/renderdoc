@@ -519,59 +519,56 @@ def extractMeshData(controller, meshData, action=None, attribute_mapping=None, d
     # Calculate relative indices (without baseVertex) for buffer size calculation
     max_relative_idx = max_idx - base_vertex if max_idx >= base_vertex else 0
     
-    # Read position buffer (like BatchExport: from vertexByteOffset, then parse by idx in memory)
+    # Read position buffer - need to read full buffer to access by idx (like CSV export)
     position_buffer = None
     position_vb = None
-    position_vertex_byte_offset = 0
+    position_offset_base = 0
     if position_attr:
         position_vb = vbs[position_attr.vertexBuffer]
-        # Calculate vertexByteOffset like BatchExport
-        position_vertex_byte_offset = (position_attr.byteOffset + position_vb.byteOffset + 
-                                      action.vertexOffset * position_vb.byteStride)
-        # Read from vertexByteOffset, size = (max_relative_idx + 1) * stride
-        buffer_size = (max_relative_idx + 1) * position_vb.byteStride
-        position_buffer = controller.GetBufferData(position_vb.resourceId, position_vertex_byte_offset, buffer_size)
-        debug_write("Position buffer: size={}, vertexByteOffset={}, max_relative_idx={}".format(
-            len(position_buffer), position_vertex_byte_offset, max_relative_idx))
+        # Calculate base offset (like CSV export: position_attr.byteOffset + vb.byteOffset)
+        position_offset_base = position_attr.byteOffset + position_vb.byteOffset
+        # Read full buffer (need max_idx + vertexOffset + 1 to cover all indices)
+        max_idx_with_offset = max_idx + action.vertexOffset if indices else 0
+        buffer_size = position_offset_base + position_vb.byteStride * (max_idx_with_offset + 1)
+        position_buffer = controller.GetBufferData(position_vb.resourceId, 0, buffer_size)
+        debug_write("Position buffer: size={}, offset_base={}, max_idx={}, vertexOffset={}".format(
+            len(position_buffer), position_offset_base, max_idx, action.vertexOffset))
     
-    # Read UV buffer
+    # Read UV buffer - need to read full buffer to access by idx (like CSV export)
     uv_buffer = None
     uv_vb = None
-    uv_vertex_byte_offset = 0
+    uv_offset_base = 0
     if uv_attr:
         uv_vb = vbs[uv_attr.vertexBuffer]
-        uv_vertex_byte_offset = (uv_attr.byteOffset + uv_vb.byteOffset + 
-                                action.vertexOffset * uv_vb.byteStride)
-        buffer_size = (max_relative_idx + 1) * uv_vb.byteStride
-        uv_buffer = controller.GetBufferData(uv_vb.resourceId, uv_vertex_byte_offset, buffer_size)
-        debug_write("UV buffer: size={}, vertexByteOffset={}".format(
-            len(uv_buffer), uv_vertex_byte_offset))
+        uv_offset_base = uv_attr.byteOffset + uv_vb.byteOffset
+        max_idx_with_offset = max_idx + action.vertexOffset if indices else 0
+        buffer_size = uv_offset_base + uv_vb.byteStride * (max_idx_with_offset + 1)
+        uv_buffer = controller.GetBufferData(uv_vb.resourceId, 0, buffer_size)
+        debug_write("UV buffer: size={}, offset_base={}".format(len(uv_buffer), uv_offset_base))
     
-    # Read normal buffer
+    # Read normal buffer - need to read full buffer to access by idx (like CSV export)
     normal_buffer = None
     normal_vb = None
-    normal_vertex_byte_offset = 0
+    normal_offset_base = 0
     if normal_attr:
         normal_vb = vbs[normal_attr.vertexBuffer]
-        normal_vertex_byte_offset = (normal_attr.byteOffset + normal_vb.byteOffset + 
-                                     action.vertexOffset * normal_vb.byteStride)
-        buffer_size = (max_relative_idx + 1) * normal_vb.byteStride
-        normal_buffer = controller.GetBufferData(normal_vb.resourceId, normal_vertex_byte_offset, buffer_size)
-        debug_write("Normal buffer: size={}, vertexByteOffset={}".format(
-            len(normal_buffer), normal_vertex_byte_offset))
+        normal_offset_base = normal_attr.byteOffset + normal_vb.byteOffset
+        max_idx_with_offset = max_idx + action.vertexOffset if indices else 0
+        buffer_size = normal_offset_base + normal_vb.byteStride * (max_idx_with_offset + 1)
+        normal_buffer = controller.GetBufferData(normal_vb.resourceId, 0, buffer_size)
+        debug_write("Normal buffer: size={}, offset_base={}".format(len(normal_buffer), normal_offset_base))
     
-    # Read tangent buffer
+    # Read tangent buffer - need to read full buffer to access by idx (like CSV export)
     tangent_buffer = None
     tangent_vb = None
-    tangent_vertex_byte_offset = 0
+    tangent_offset_base = 0
     if tangent_attr:
         tangent_vb = vbs[tangent_attr.vertexBuffer]
-        tangent_vertex_byte_offset = (tangent_attr.byteOffset + tangent_vb.byteOffset + 
-                                      action.vertexOffset * tangent_vb.byteStride)
-        buffer_size = (max_relative_idx + 1) * tangent_vb.byteStride
-        tangent_buffer = controller.GetBufferData(tangent_vb.resourceId, tangent_vertex_byte_offset, buffer_size)
-        debug_write("Tangent buffer: size={}, vertexByteOffset={}".format(
-            len(tangent_buffer), tangent_vertex_byte_offset))
+        tangent_offset_base = tangent_attr.byteOffset + tangent_vb.byteOffset
+        max_idx_with_offset = max_idx + action.vertexOffset if indices else 0
+        buffer_size = tangent_offset_base + tangent_vb.byteStride * (max_idx_with_offset + 1)
+        tangent_buffer = controller.GetBufferData(tangent_vb.resourceId, 0, buffer_size)
+        debug_write("Tangent buffer: size={}, offset_base={}".format(len(tangent_buffer), tangent_offset_base))
     
     # Extract vertex data for each index (like BatchExport)
     debug_write("\nExtracting vertex data for each index...")
@@ -580,45 +577,46 @@ def extractMeshData(controller, meshData, action=None, attribute_mapping=None, d
     
     for idx in indices:
         if idx not in vertex_data_by_idx:
-            # idx already includes baseVertex, so we need relative index for buffer access
-            relative_idx = idx - base_vertex
-            
-            # Read position (like BatchExport: full_buffer[relative_idx * stride])
-            if position_buffer and position_vb:
-                offset_in_buffer = relative_idx * position_vb.byteStride
+            # idx already includes baseVertex
+            # Calculate offset like CSV export: position_offset_base + vb.byteStride * (idx + action.vertexOffset)
+            if position_buffer and position_vb and position_attr:
+                offset_in_buffer = position_offset_base + position_vb.byteStride * (idx + action.vertexOffset)
                 if offset_in_buffer + position_attr.format.compByteWidth * position_attr.format.compCount <= len(position_buffer):
                     pos_data = position_buffer[offset_in_buffer:offset_in_buffer + position_attr.format.compByteWidth * position_attr.format.compCount]
                     pos_value = unpackData(position_attr.format, pos_data)
                     pos = (float(pos_value[0]), float(pos_value[1]), float(pos_value[2]) if len(pos_value) > 2 else 0.0)
                 else:
-                    debug_write("WARNING: Position offset {} out of bounds (buffer size: {}, relative_idx: {})".format(
-                        offset_in_buffer, len(position_buffer), relative_idx))
+                    debug_write("WARNING: Position offset {} out of bounds (buffer size: {}, idx: {}, vertexOffset: {})".format(
+                        offset_in_buffer, len(position_buffer), idx, action.vertexOffset))
                     pos = (0.0, 0.0, 0.0)
             else:
                 pos = (0.0, 0.0, 0.0)
             
-            # Read UV
+            # Read UV (same offset calculation as position)
             uv = (0.0, 0.0)
             if uv_attr and uv_buffer and uv_vb:
-                offset_in_buffer = relative_idx * uv_vb.byteStride
+                uv_offset_base = uv_attr.byteOffset + uv_vb.byteOffset
+                offset_in_buffer = uv_offset_base + uv_vb.byteStride * (idx + action.vertexOffset)
                 if offset_in_buffer + uv_attr.format.compByteWidth * uv_attr.format.compCount <= len(uv_buffer):
                     uv_data_bytes = uv_buffer[offset_in_buffer:offset_in_buffer + uv_attr.format.compByteWidth * uv_attr.format.compCount]
                     uv_value = unpackData(uv_attr.format, uv_data_bytes)
                     uv = (float(uv_value[0]), float(uv_value[1]) if len(uv_value) > 1 else 0.0)
             
-            # Read normal
+            # Read normal (same offset calculation as position)
             normal = (0.0, 0.0, 1.0)
             if normal_attr and normal_buffer and normal_vb:
-                offset_in_buffer = relative_idx * normal_vb.byteStride
+                normal_offset_base = normal_attr.byteOffset + normal_vb.byteOffset
+                offset_in_buffer = normal_offset_base + normal_vb.byteStride * (idx + action.vertexOffset)
                 if offset_in_buffer + normal_attr.format.compByteWidth * normal_attr.format.compCount <= len(normal_buffer):
                     normal_data_bytes = normal_buffer[offset_in_buffer:offset_in_buffer + normal_attr.format.compByteWidth * normal_attr.format.compCount]
                     normal_value = unpackData(normal_attr.format, normal_data_bytes)
                     normal = (float(normal_value[0]), float(normal_value[1]), float(normal_value[2]) if len(normal_value) > 2 else 0.0)
             
-            # Read tangent
+            # Read tangent (same offset calculation as position)
             tangent = (1.0, 0.0, 0.0)
             if tangent_attr and tangent_buffer and tangent_vb:
-                offset_in_buffer = relative_idx * tangent_vb.byteStride
+                tangent_offset_base = tangent_attr.byteOffset + tangent_vb.byteOffset
+                offset_in_buffer = tangent_offset_base + tangent_vb.byteStride * (idx + action.vertexOffset)
                 if offset_in_buffer + tangent_attr.format.compByteWidth * tangent_attr.format.compCount <= len(tangent_buffer):
                     tangent_data_bytes = tangent_buffer[offset_in_buffer:offset_in_buffer + tangent_attr.format.compByteWidth * tangent_attr.format.compCount]
                     tangent_value = unpackData(tangent_attr.format, tangent_data_bytes)
@@ -626,58 +624,66 @@ def extractMeshData(controller, meshData, action=None, attribute_mapping=None, d
             
             vertex_data_by_idx[idx] = (pos, uv, normal, tangent)
     
-    # Deduplicate vertices based on (position, uv) - same as before
+    # Deduplicate vertices based on position only (not UV)
+    # This allows different UVs at the same position (for proper texture mapping)
     vertex_key_to_index = {}
     vertices = []
-    uv_data = []
     normal_data = []
     tangent_data = []
     idx_to_vertex_idx = {}
     
-    debug_write("\nDeduplicating vertices based on (position, uv)...")
+    # Store UV data per polygon vertex (in index order, before deduplication)
+    polygon_uv_data = []
+    polygon_normal_data = []
+    
+    debug_write("\nDeduplicating vertices based on position only...")
+    debug_write("First 10 indices: {}".format(indices[:10]))
+    
+    # Use rounded position for key to avoid floating point precision issues
+    # Round to 6 decimal places (same as FBX export precision)
+    EPSILON = 1e-6
+    def make_key(pos):
+        return (round(pos[0] / EPSILON) * EPSILON, 
+                round(pos[1] / EPSILON) * EPSILON, 
+                round(pos[2] / EPSILON) * EPSILON)
+    
     for idx in indices:
         pos, uv, normal, tangent = vertex_data_by_idx[idx]
-        key = (pos, uv)
+        # Use rounded position as key for deduplication to avoid precision issues
+        key = make_key(pos)
         
         if key not in vertex_key_to_index:
             vertex_idx = len(vertices)
             vertices.append(pos)
-            uv_data.append(uv)
             normal_data.append(normal)
             tangent_data.append(tangent)
             vertex_key_to_index[key] = vertex_idx
+            if len(vertices) <= 5:
+                debug_write("  New vertex {}: idx={}, pos={}".format(vertex_idx, idx, pos))
         
         idx_to_vertex_idx[idx] = vertex_key_to_index[key]
+        
+        # Store UV and normal for each polygon vertex (in index order)
+        polygon_uv_data.append(uv)
+        polygon_normal_data.append(normal)
+    
+    debug_write("First 10 polygon indices: {}".format([idx_to_vertex_idx[idx] for idx in indices[:10]]))
     
     # Create polygon indices
     polygon_indices = [idx_to_vertex_idx[idx] for idx in indices]
     
-    # Reverse winding order for each triangle to fix face orientation
-    # Original: [v0, v1, v2, v3, v4, v5, ...] (triangles: 0-1-2, 3-4-5, ...)
-    # Reversed: [v0, v2, v1, v3, v5, v4, ...] (triangles: 0-2-1, 3-5-4, ...)
-    reversed_polygon_indices = []
-    for i in range(0, len(polygon_indices), 3):
-        if i + 2 < len(polygon_indices):
-            # Reverse triangle: [v0, v1, v2] -> [v0, v2, v1]
-            reversed_polygon_indices.extend([
-                polygon_indices[i],
-                polygon_indices[i + 2],
-                polygon_indices[i + 1]
-            ])
-        else:
-            # Not enough vertices for a complete triangle, keep as is
-            reversed_polygon_indices.extend(polygon_indices[i:])
-    
+    # Don't reverse triangle winding - keep the original order from indices
+    # The indices order from RenderDoc should match the CSV export order
     debug_write("Extraction complete:")
     debug_write("  - Vertices: {}".format(len(vertices)))
-    debug_write("  - Polygon indices (original): {}".format(len(polygon_indices)))
-    debug_write("  - Polygon indices (reversed): {}".format(len(reversed_polygon_indices)))
-    debug_write("  - UV data: {}".format(len(uv_data)))
+    debug_write("  - Polygon indices: {}".format(len(polygon_indices)))
+    debug_write("  - Polygon UV data: {}".format(len(polygon_uv_data)))
     debug_write("  - Normal data: {}".format(len(normal_data)))
     debug_write("  - Tangent data: {}".format(len(tangent_data)))
     debug_write("=" * 60)
     
-    return vertices, reversed_polygon_indices, uv_data, normal_data, tangent_data
+    # Return polygon UV data (one per polygon vertex) instead of deduplicated UV data
+    return vertices, polygon_indices, polygon_uv_data, polygon_normal_data, tangent_data
 
 
 def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, filepath):
@@ -760,32 +766,17 @@ def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, file
         
         # UV Layer
         # Use ByPolygonVertex + IndexToDirect (like UE exports)
-        # This allows each polygon vertex to reference a unique UV, even if vertices share positions
+        # uv_data is now per-polygon-vertex (same order as polygon_indices)
         if uv_data and len(uv_data) > 0:
             # Create unique UV list and UVIndex array
             # UVIndex maps each polygon vertex to a UV in the UV array
             unique_uvs = []
             uv_to_index = {}
-            uv_indices = []
             
-            # Build unique UV list and index mapping
+            # Build unique UV list and index mapping from polygon vertex UVs
+            polygon_uv_indices = []
             for uv in uv_data:
                 # Flip V coordinate for FBX convention
-                uv_flipped = (uv[0], 1.0 - uv[1])
-                if uv_flipped not in uv_to_index:
-                    uv_to_index[uv_flipped] = len(unique_uvs)
-                    unique_uvs.append(uv_flipped)
-                uv_indices.append(uv_to_index[uv_flipped])
-            
-            # UVIndex should match polygon_indices (one UV index per polygon vertex)
-            # Since we deduplicated vertices, each polygon_indices[i] corresponds to uv_data[polygon_indices[i]]
-            # But we need to map polygon vertices to UV indices
-            # For ByPolygonVertex, we need one UV index per polygon vertex (same order as polygon_indices)
-            polygon_uv_indices = []
-            for idx in polygon_indices:
-                # idx is the vertex index in the deduplicated vertices list
-                # uv_data[idx] is the UV for that vertex
-                uv = uv_data[idx]
                 uv_flipped = (uv[0], 1.0 - uv[1])
                 if uv_flipped not in uv_to_index:
                     uv_to_index[uv_flipped] = len(unique_uvs)
@@ -814,11 +805,11 @@ def writeFBX(vertices, polygon_indices, uv_data, normal_data, tangent_data, file
         
         # Normal Layer
         # Use ByPolygonVertex + Direct (like BatchExport)
+        # normal_data is now per-polygon-vertex (same order as polygon_indices)
         if normal_data and len(normal_data) > 0:
-            # For Direct mode, we need normals in polygon vertex order (not unique list)
+            # For Direct mode, we need normals in polygon vertex order
             polygon_normals = []
-            for idx in polygon_indices:
-                normal = normal_data[idx]
+            for normal in normal_data:
                 nx, ny, nz = normal[0], normal[1], normal[2]
                 length = (nx*nx + ny*ny + nz*nz) ** 0.5
                 if length > 0.0001:
